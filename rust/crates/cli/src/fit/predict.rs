@@ -4364,7 +4364,7 @@ fn run_predict(
             // The tag names the column contract the file was written under;
             // every change to the column set bumps it. The versions are
             // listed in docs/camdl-run-spec.md §2.2.2.
-            "schema": "camdl.predictive/v6",
+            "schema": PREDICTIVE_SCHEMA,
             // gh#896: the run whose draws these bands replay, and the options
             // that shaped them (they also key this directory's address).
             "run_id": run_id,
@@ -5022,6 +5022,9 @@ fn band_row(
 /// never replayed silently — a full free-forward replay of a long-burn-in ODE
 /// fit is thousands of ~seconds-each solves (gh#387).
 pub(crate) const DEFAULT_PREDICT_DRAWS: usize = 200;
+
+/// The `schema` tag of `predictive.json`.
+pub(crate) const PREDICTIVE_SCHEMA: &str = "camdl.predictive/v6";
 
 /// Every input that changes what `camdl predict` writes, beyond the run it
 /// reads, resolved to the values the predict used. Together with the run and

@@ -191,6 +191,7 @@ pub(crate) fn score_prediction(
         store::Begin::Busy(owner) => return Err(store::Error::InProgress(owner).to_string()),
         store::Begin::Claimed(run) => run,
     };
+    let partition = training_partition(prediction)?;
     let mut recomputed = crate::fit::predict::recompute(out, &reposed, info, &binding)?;
     check_recomputed(prediction, &recomputed)?;
     // A stream the prediction failed to compute has no row to score; its
@@ -207,7 +208,7 @@ pub(crate) fn score_prediction(
     let calendar = ir::caltime::CalendarAxis::from_model(&model).map_err(|e| e.to_string())?;
     let rules = ScoreRules { intervals: INTERVALS, pit_seed };
     let last_scored_end = recomputed.scored.cells.iter().map(|c| c.stop).fold(f64::NEG_INFINITY, f64::max);
-    let labels = Labels::of(prediction, &settings, &recomputed.files, last_scored_end, recomputed.scored.plug_in)?;
+    let labels = Labels::of(prediction, &settings, partition, last_scored_end, recomputed.scored.plug_in);
     let rendered = render(&recomputed.scored, &rules, &labels, &calendar, &recomputed.forcings_held)?;
     for (name, bytes) in [
         ("scored.tsv", rendered.scored.into_bytes()),
@@ -580,23 +581,12 @@ impl Labels {
     fn of(
         prediction: &store::Stored<crate::fit_store::Prediction>,
         settings: &serde_json::Value,
-        files: &BTreeMap<String, Vec<u8>>,
+        partition: Option<TrainingPartition>,
         last_scored_end: f64,
         plug_in: bool,
-    ) -> Result<Labels, String> {
+    ) -> Labels {
         use crate::fit_store::ParameterSourceRecord;
         let id = prediction.identity();
-        // The training partition the manifests record (`predictive*.json` or
-        // `forecast.json`, whichever the prediction wrote): whether the fit
-        // held rows out, and the end of its last training row.
-        let partition = files
-            .iter()
-            .filter(|(n, _)| !n.contains('/') && n.ends_with(".json") && (n.starts_with("predictive") || n.starts_with("forecast")))
-            .find_map(|(_, b)| {
-                let doc: serde_json::Value = serde_json::from_slice(b).ok()?;
-                let p = &doc["training_rows"];
-                Some((p["rule"]["kind"].as_str() != Some("all"), p["extent"]["t"].as_f64()?))
-            });
         let (parameters, conditioning) = match &id.source {
             // A fit that held nothing out still scores held out the outcome
             // rows past its data: the parameters saw none of them.
@@ -606,7 +596,7 @@ impl Labels {
             ParameterSourceRecord::Posterior { draws, .. } => (
                 if plug_in { "winner" } else { "posterior" },
                 match partition {
-                    Some((held, train_end))
+                    Some(TrainingPartition { held_out: held, train_end })
                         if held || last_scored_end > train_end + crate::fit::runner::TIME_TIE_EPS =>
                     {
                         score::trace::Conditioning::HoldOutTail { train_end, theta_source: draws.id().key().to_hex() }
@@ -626,7 +616,7 @@ impl Labels {
             .as_object()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect())
             .unwrap_or_default();
-        Ok(Labels { prediction: prediction.id().key().to_hex(), parameters, conditioning, covariates, settings: settings.clone() })
+        Labels { prediction: prediction.id().key().to_hex(), parameters, conditioning, covariates, settings: settings.clone() }
     }
 
     /// The label of every score of a forecast read under a `realised`
@@ -634,6 +624,62 @@ impl Labels {
     fn realised(&self) -> bool {
         self.covariates.values().any(|s| s == "realised")
     }
+}
+
+/// The training partition a prediction's manifest records: whether the fit
+/// held rows out, and the end of its last training row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TrainingPartition {
+    held_out: bool,
+    train_end: f64,
+}
+
+/// The training partition the stored prediction's manifests record, read
+/// from its first `predictive*.json` or `forecast*.json` in name order, or
+/// `None` when it stores neither: a prediction that emitted no predictive
+/// or forecast table writes no such manifest, and has no row to score.
+///
+/// Every such manifest must be one this build writes. One that is not JSON,
+/// carries another `schema` tag, or records no `training_rows` with a rule
+/// and an extent is refused, naming the file: a posterior prediction's rows
+/// are labelled held out or in sample from those rows, and without them
+/// every row would be labelled in sample.
+fn training_partition(prediction: &store::Stored<crate::fit_store::Prediction>) -> Result<Option<TrainingPartition>, String> {
+    use crate::result_files::fit::{PredictionFile, PredictionPart};
+    let mut found = None;
+    for name in prediction.result_files() {
+        let expected = match PredictionFile::parse(name) {
+            Some(PredictionFile::Manifest { part: PredictionPart::Predictive, .. }) => crate::fit::predict::PREDICTIVE_SCHEMA,
+            Some(PredictionFile::Manifest { part: PredictionPart::Forecast, .. }) => crate::fit::forecast_output::FORECAST_SCHEMA,
+            _ => continue,
+        };
+        let bytes = crate::camdl_store::read_stored(prediction, name)?;
+        let partition = partition_of(&bytes, expected).map_err(|why| {
+            format!(
+                "the stored prediction {}'s `{name}` {why}, so the rows its parameters were trained on are not known; \
+                 make the prediction again with `camdl predict` and score that",
+                prediction.id().key().short12()
+            )
+        })?;
+        found.get_or_insert(partition);
+    }
+    Ok(found)
+}
+
+/// The training partition one manifest's `bytes` record, refused with the
+/// reason when they are not a manifest tagged `expected` that records its
+/// `training_rows`.
+fn partition_of(bytes: &[u8], expected: &str) -> Result<TrainingPartition, String> {
+    let doc: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("cannot be read as JSON ({e})"))?;
+    match doc["schema"].as_str() {
+        Some(tag) if tag == expected => {}
+        Some(tag) => return Err(format!("is tagged `{tag}`, where this build reads `{expected}`")),
+        None => return Err(format!("carries no `schema` tag, where this build reads `{expected}`")),
+    }
+    let rows = doc.get("training_rows").ok_or("records no `training_rows`")?;
+    let kind = rows["rule"]["kind"].as_str().ok_or("records `training_rows` with no `rule.kind`")?;
+    let train_end = rows["extent"]["t"].as_f64().ok_or("records `training_rows` with no `extent.t`")?;
+    Ok(TrainingPartition { held_out: kind != "all", train_end })
 }
 
 /// The three files of a score.
@@ -1036,5 +1082,38 @@ mod tests {
         assert!(super::same_files(&stored, &missing).unwrap_err().contains("writes no `forecast/cases.tsv`"));
         let extra = files(&[("forecast/cases.tsv", "a\n1\n"), ("forecast.json", "{}"), ("more.tsv", "")]);
         assert!(super::same_files(&stored, &extra).unwrap_err().contains("writes `more.tsv`"));
+    }
+
+    /// A manifest's training partition is read only from a manifest this
+    /// build writes: one that is not JSON, carries another tag, or records no
+    /// `training_rows` is refused with the reason.
+    #[test]
+    fn a_training_partition_is_read_only_from_a_current_manifest() {
+        use super::{partition_of, TrainingPartition};
+        let tag = crate::fit::forecast_output::FORECAST_SCHEMA;
+        let held = serde_json::json!({
+            "schema": tag,
+            "training_rows": { "rule": { "kind": "holdout_after" }, "extent": { "t": 24.0 } },
+        });
+        let bytes = |v: &serde_json::Value| serde_json::to_vec(v).unwrap();
+        assert_eq!(partition_of(&bytes(&held), tag), Ok(TrainingPartition { held_out: true, train_end: 24.0 }));
+        let mut all = held.clone();
+        all["training_rows"]["rule"]["kind"] = "all".into();
+        assert_eq!(partition_of(&bytes(&all), tag), Ok(TrainingPartition { held_out: false, train_end: 24.0 }));
+
+        assert!(partition_of(b"{ not json", tag).unwrap_err().contains("cannot be read as JSON"));
+        let mut old = held.clone();
+        old["schema"] = "camdl.forecast/v5".into();
+        assert!(partition_of(&bytes(&old), tag).unwrap_err().contains("is tagged `camdl.forecast/v5`"));
+        let mut untagged = held.clone();
+        untagged.as_object_mut().unwrap().remove("schema");
+        assert!(partition_of(&bytes(&untagged), tag).unwrap_err().contains("no `schema` tag"));
+        let mut renamed = held.clone();
+        let rows = renamed.as_object_mut().unwrap().remove("training_rows").unwrap();
+        renamed["parameter_set"] = rows;
+        assert_eq!(partition_of(&bytes(&renamed), tag).unwrap_err(), "records no `training_rows`");
+        let mut no_extent = held;
+        no_extent["training_rows"].as_object_mut().unwrap().remove("extent");
+        assert!(partition_of(&bytes(&no_extent), tag).unwrap_err().contains("no `extent.t`"));
     }
 }
