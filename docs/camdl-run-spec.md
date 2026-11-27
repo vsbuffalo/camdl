@@ -2359,6 +2359,47 @@ stores; a command that reads a stored fit lists the fit's `model_source` and
   wrote, apart from `camdl` and `label`, which are the importing build's and the
   import's own.
 
+#### Reading a fit run from a manifest
+
+`--from-manifest PATH` makes a command that reads a stored fit run read the one
+`fit_run` the output manifest at PATH lists, by its run id, so a workflow step
+reads the result an earlier step's manifest names:
+
+```bash
+camdl fit run fits/m4w_mh.toml --label m4w_mh --manifest build/fits/m4w_mh.json
+camdl predict --from-manifest build/fits/m4w_mh.json --mode one-step --manifest build/predictions/m4w_mh.json
+```
+
+- `predict`: in place of the `RUN` handle.
+- `simulate`: in place of `--fit <run>`, as with `--draws posterior`.
+- `profile`: in place of `--fit`; the profile is of the run's fit problem.
+- `pfilter`: in place of `--fit` and a parameters file. The run's problem is
+  read as `--fit <run>` reads it, and its `mle_params` is read as the first
+  `--params` file, before any `--params` given.
+
+The command is the command given the run's run id in place of `--from-manifest`:
+it stores and reuses the same results under the same run ids, and the manifest's
+path enters no run id. The run is looked up in the run store the command reads
+(§2.1). Before the command reads the run, each result file the store records for
+it must be listed in the manifest with the SHA-256 and size `run.json` records;
+every file the command reads is then checked against that digest as it is read.
+
+What is refused, each with exit 1 and before anything is stored:
+
+- a manifest of another schema or version, as `camdl path --manifest` refuses
+  it, naming the version found and the version read;
+- a manifest that lists no `fit_run`, or several, naming how many;
+- a fit run the run store does not hold completed, naming its run id and the
+  store;
+- a result file whose digest or size differs from the manifest's, naming the
+  file and both digests, and a result file the manifest does not list;
+- for `pfilter`, a run that stores no `mle_params`, such as a PGAS or MH run,
+  naming its method.
+
+`--from-manifest` beside the handle or `--fit` it replaces is refused by
+argument parsing (exit 2), and so is `pfilter --from-manifest` beside
+`--scenario`, as `--params` is.
+
 ### 2.11 The link tree
 
 `--link-root DIR` makes a command that stores results also write, once it has

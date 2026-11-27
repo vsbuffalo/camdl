@@ -5,11 +5,12 @@ Nov 23, 2026 · Vince Buffalo
 Builds on: `2026-11-20-run-store-api.md` (the run store) and
 `2026-11-23-prediction-and-scores.md` (predictions and scores).
 
-Status: accepted 2026-11-23. Not yet implemented. Claims about current behaviour
-are marked _verified_, with the file and line or the command that checked them,
-or _inferred_. Commands were run with the `camdl` built from `bbee1bb13` (and a
-rebuild of that commit with uncommitted edits, `0.1.0+bbee1bb13.dirty-e5518506`)
-in a scratch store; line references are to `origin/main` at `de896b47c`.
+Status: accepted 2026-11-23. Stage 7, `--from-manifest`, is implemented. Claims
+about current behaviour are marked _verified_, with the file and line or the
+command that checked them, or _inferred_. Commands were run with the `camdl`
+built from `bbee1bb13` (and a rebuild of that commit with uncommitted edits,
+`0.1.0+bbee1bb13.dirty-e5518506`) in a scratch store; line references are to
+`origin/main` at `de896b47c`.
 
 ## Summary
 

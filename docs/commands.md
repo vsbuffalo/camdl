@@ -74,7 +74,11 @@ stored by run id (run spec §2.10). A later step finds a file through it:
 after checking that the store holds the bytes the manifest records, and
 `camdl cat --manifest build/fit.json draws` prints them. Over a sweep,
 `camdl path --manifest build/sweep.json traj --each` prints one row per cell:
-its run id, its attributes and the path. The lookup rules are run spec §4.5.
+its run id, its attributes and the path. The lookup rules are run spec §4.5. A
+step that reads a stored fit run takes the manifest in place of the run's
+handle: `camdl predict --from-manifest build/fit.json` predicts from the one fit
+run the manifest lists, after the same check, and `simulate`, `profile` and
+`pfilter` take it in place of `--fit` (run spec §2.10).
 
 **Browsing results as plain files.** `--link-root DIR`, else the environment
 variable `CAMDL_LINK_ROOT`, makes `simulate`, `fit run`, `pfilter`, `profile`,
