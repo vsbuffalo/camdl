@@ -119,12 +119,12 @@ stream that ends within that duration of the origin
 `holdout_after = "2025-02-16"` and `--horizon "4 weeks"`, the `weekly` stream
 has four targets:
 
-| Forecast target        | Position | Lead time |
-| ---------------------- | -------- | --------- |
-| week of 16–22 February | 0        | 7 days    |
-| week of 23 Feb – 1 Mar | 1        | 14 days   |
-| week of 2–8 March      | 2        | 21 days   |
-| week of 9–15 March     | 3        | 28 days   |
+| Forecast target        | Periods ahead | Lead time |
+| ---------------------- | ------------- | --------- |
+| week of 16–22 February | 1             | 7 days    |
+| week of 23 Feb – 1 Mar | 2             | 14 days   |
+| week of 2–8 March      | 3             | 21 days   |
+| week of 9–15 March     | 4             | 28 days   |
 
 A `daily` stream bound to the same fit would have 28 targets, one for each day
 from 16 February to 15 March, with lead times of 1 to 28 days. The reach only
@@ -141,21 +141,21 @@ the period.
 
 - The _lead time_ is the duration from the forecast origin to the end of the
   target, in model time units. It is comparable across streams.
-- The _position_ counts a stream's targets from 0, in the stream's own periods:
-  position 0 is the first target that ends after the origin. Position 2 is three
-  weeks ahead for `weekly` and three days ahead for `daily`, so positions are
-  comparable only within one stream. The field of `Target` and the column of a
-  forecast's output that hold it are both named `horizon`, the same word as the
-  flag, though they hold the position and not the reach.
+- _Periods ahead_ counts a stream's targets from 1, in the stream's own periods:
+  the first target that ends after the origin is 1 period ahead. A target 3
+  periods ahead is three weeks ahead for `weekly` and three days ahead for
+  `daily`, so the count is comparable only within one stream. It is the
+  `periods_ahead` field of `Target` and column of a forecast's output.
 
 <!-- figure: forecasting-origin-and-targets, caption: One forecast of the `weekly` stream under `holdout_after = "2025-02-16"` and `--horizon "4 weeks"`. -->
 
 ```
 week ending       11 Jan … 8 Feb  15 Feb |  22 Feb   1 Mar   8 Mar  15 Mar
-                [---- six training rows --]|[pos 0] [pos 1] [pos 2] [pos 3]
+                [---- six training rows --]|[  1  ] [  2  ] [  3  ] [  4  ]
 training rows     <----------------------->|
 conditioning rows <----------------------->|
                           forecast origin, 16 Feb (day 42)
+periods ahead                                  1       2       3       4
 lead (days)                                    7      14      21      28
 ```
 
@@ -163,8 +163,8 @@ lead (days)                                    7      14      21      28
 
 Hyndman and Athanasopoulos (2021, §5.8) use "forecast horizon" for the number of
 steps ahead, _h_, with the first future period at _h_ = 1. For a stream whose
-first target is a whole period, their _h_-step forecast is camdl's position _h_
-− 1.
+first target is a whole period, their _h_-step forecast is the target whose
+`periods_ahead` is _h_.
 
 The epidemic forecast hubs define a horizon by dates. In the CDC COVID-19
 Forecast Hub and in FluSight, a forecast has a `reference_date`, the Saturday
@@ -175,18 +175,19 @@ submission, and horizon −1 is the week before it, for which data usually exist
 The earlier US COVID-19 Forecast Hub named the unit in each target, with "N wk
 ahead" and "N day ahead" targets in one file (US COVID-19 Forecast Hub).
 
-camdl's position differs from a hub horizon in two ways. First, it is counted
-from the end of the data the fit trained on, and a hub's horizon from the
-submission date, so the two agree only when the data are current. The CDC hub's
-README gives an example of its data timing: the release of 11 June 2025 holds
-data through the week ending 7 June. Forecasts due that day have the reference
-date 14 June by the hub's rule, so their horizon 0 is the week of 8 to 14 June.
-A camdl forecast trained through 7 June has the same week at position 0. If the
-same stream's data stopped a week earlier, camdl's position 0 would be the hub's
-horizon −1. Second, camdl's position is never negative, because a target ends
-after the origin. A forecast converted to a hub format needs its hub horizon
-computed from each target's end date and the hub's reference date; camdl writes
-the end date and does not write a hub horizon.
+camdl's periods ahead differs from a hub horizon in two ways. First, it is
+counted from the end of the data the fit trained on, and a hub's horizon from
+the submission date, so the two agree only when the data are current. The CDC
+hub's README gives an example of its data timing: the release of 11 June 2025
+holds data through the week ending 7 June. Forecasts due that day have the
+reference date 14 June by the hub's rule, so their horizon 0 is the week of 8 to
+14 June. A camdl forecast trained through 7 June has the same week 1 period
+ahead, so when the data are current, camdl's periods ahead is the hub's horizon
+plus 1. If the same stream's data stopped a week earlier, the target 1 period
+ahead would be the hub's horizon −1. Second, camdl's count starts at 1, because
+every target ends after the origin. A forecast converted to a hub format needs
+its hub horizon computed from each target's end date and the hub's reference
+date; camdl writes the end date and does not write a hub horizon.
 
 ### 1.3 What a forecast is conditioned on
 
@@ -332,9 +333,9 @@ is refused, because there is no rule for which one to follow
 A stream with window columns and no `emit_schedule` declares no rhythm. When it
 has held-out rows, their periods within the reach are its targets, after a check
 that they are in order, distinct, and overlap neither each other nor a training
-row. Nothing is extrapolated. Such a target's position counts held-out rows and
-is not comparable with the position of a tiled stream's target; compare these
-targets by lead time.
+row. Nothing is extrapolated. Such a target's periods ahead counts held-out rows
+and is not comparable with the periods ahead of a tiled stream's target; compare
+these targets by lead time.
 
 Anything else is refused, per stream
 ([`StreamRefusal`](rust:cli::fit::forecast_plan::StreamRefusal)). A
@@ -349,9 +350,9 @@ stream has a target.
 
 When a stream has a declared rhythm, held-out rows only select which targets
 have an observed value. They do not renumber the targets, so a missing week does
-not shift the position of the weeks after it. A held-out row within the reach
-whose period is not one of the stream's targets is refused. Skipping it would
-leave a period out of the score without saying so.
+not shift the periods ahead of the weeks after it. A held-out row within the
+reach whose period is not one of the stream's targets is refused. Skipping it
+would leave a period out of the score without saying so.
 
 `camdl predict --mode free_forward` builds no plan. Past a stream's data its
 rows continue at the most common gap between the stream's observation times
@@ -373,15 +374,16 @@ the origin. Take both example streams with `holdout_after = "2025-01-29"`:
 
 The `weekly` stream's next week, 26 January to 1 February, began three days
 before the origin. Because the stream's targets tile from its last training row
-(§1.5), that week is its first target, at position 0 with a lead time of 4 days.
+(§1.5), that week is its first target, 1 period ahead with a lead time of 4
+days.
 
-<!-- figure: forecasting-two-cadences, caption: The `daily` and `weekly` streams under `holdout_after = "2025-01-29"`. Each stream counts positions in its own periods. -->
+<!-- figure: forecasting-two-cadences, caption: The `daily` and `weekly` streams under `holdout_after = "2025-01-29"`. Each stream counts periods ahead in its own periods. -->
 
 ```
 date          19 … 25 Jan | 26  27  28 Jan | 29 Jan … 1 Feb | 2 … 8 Feb | 9 … 15 Feb
-daily         observed through 28 Jan       | pos 0, 1, 2, 3 …
+daily         observed through 28 Jan       | 1, 2, 3, 4 … periods ahead
 weekly        [ 19–25 Jan ] [ happened      | simulated     ] [ 2–8 Feb ] [ 9–15 Feb ]
-                            [------- position 0 ------------] [ pos 1   ] [ pos 2    ]
+                            [----- 1 period ahead ----------] [   2     ] [   3      ]
                                        forecast origin, 29 Jan (day 24)
 ```
 

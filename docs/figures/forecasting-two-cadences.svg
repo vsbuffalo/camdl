@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 262" role="img" aria-labelledby="t d">
-  <title id="t">Target positions on a daily and a weekly stream, with a week under way at the forecast origin</title>
-  <desc id="d">A daily stream observed through 28 January and a weekly stream whose last training row covers 19 to 25 January. The forecast origin is the start of 29 January, day 24. The daily stream's targets are 29 January, 30 January, 31 January and 1 February, at positions 0 to 3. The weekly stream's week of 26 January to 1 February began before the origin: 26 to 28 January have happened and their count is estimated through the conditioning on the daily rows, 29 January to 1 February are simulated, and the whole week is the weekly stream's target at position 0. The week of 2 to 8 February is at position 1 and the week of 9 to 15 February at position 2.</desc>
+  <title id="t">Periods ahead on a daily and a weekly stream, with a week under way at the forecast origin</title>
+  <desc id="d">A daily stream observed through 28 January and a weekly stream whose last training row covers 19 to 25 January. The forecast origin is the start of 29 January, day 24. The daily stream's targets are 29 January, 30 January, 31 January and 1 February, 1 to 4 periods ahead. The weekly stream's week of 26 January to 1 February began before the origin: 26 to 28 January have happened and their count is estimated through the conditioning on the daily rows, 29 January to 1 February are simulated, and the whole week is the weekly stream's target 1 period ahead. The week of 2 to 8 February is 2 periods ahead and the week of 9 to 15 February 3 periods ahead.</desc>
 
   <!-- day d sits at x = 150 + 16 * (d - 14); day 0 is 5 January 2025 -->
   <text x="4" y="58" class="t-mono-label fig-ink">daily</text>
@@ -19,9 +19,9 @@
     <rect x="342" y="44" width="16" height="20"/><rect x="358" y="44" width="16" height="20"/>
   </g>
   <g class="t-small fig-ink" text-anchor="middle">
-    <text x="318" y="36">0</text><text x="334" y="36">1</text><text x="350" y="36">2</text><text x="366" y="36">3</text>
+    <text x="318" y="36">1</text><text x="334" y="36">2</text><text x="350" y="36">3</text><text x="366" y="36">4</text>
   </g>
-  <text x="384" y="36" class="t-small fig-muted">positions count days</text>
+  <text x="384" y="36" class="t-small fig-muted">periods ahead, counted in days</text>
 
   <!-- weekly: days 14 to 20 observed; the week of days 21 to 27 under way -->
   <rect x="150" y="110" width="112" height="24" class="fig-panel s-line"/>
@@ -31,7 +31,7 @@
   <rect x="374" y="110" width="112" height="24" class="fig-accent-soft s-accent"/>
   <rect x="486" y="110" width="112" height="24" class="fig-accent-soft s-accent"/>
   <g class="t-small fig-ink" text-anchor="middle">
-    <text x="346" y="102">position 0</text><text x="430" y="102">position 1</text><text x="542" y="102">position 2</text>
+    <text x="352" y="102">1 ahead</text><text x="430" y="102">2 ahead</text><text x="542" y="102">3 ahead</text>
     <text x="430" y="127">2–8 Feb</text><text x="542" y="127">9–15 Feb</text>
   </g>
   <text x="330" y="156" class="t-small fig-ink">29 Jan – 1 Feb: simulated after the origin</text>
