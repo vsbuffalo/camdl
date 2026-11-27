@@ -405,7 +405,7 @@ pub(crate) fn run_forecast(out: &crate::out::Out, job: ForecastJob) -> Result<Fo
     let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
         model, job.compiled, bindings.training_by_source(), &time_opts)?;
 
-    // The parameter set: the rows the fit recorded, verified against the data.
+    // The training rows: the rows the fit recorded, verified against the data.
     let rows: BTreeMap<String, Vec<ObservedRow>> =
         streams.iter().map(|s| (s.name.clone(), s.rows.clone())).collect();
     let (record, partition) = TrainingPartition::read(job.partition, &rows)?;

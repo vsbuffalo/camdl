@@ -262,7 +262,7 @@ impl TrainingPartition {
     /// The partition a fit recorded, checked against the rows read now: every
     /// stream of `rows` must have a recorded prefix, its file must still hold
     /// at least that many rows, and those rows must digest to the recorded
-    /// digest. A forecast reads its parameter set only through this, so a plan
+    /// digest. A forecast reads its training rows only through this, so a plan
     /// can never claim the parameters were fitted to rows that changed after
     /// the fit (`docs/engineering/forecasting.md` §3.3).
     pub(crate) fn from_record(
@@ -332,7 +332,7 @@ impl TrainingPartition {
     /// ([`Self::from_record`]). `rows` must hold every stream the fit bound:
     /// the recorded extent is checked against them. A fit that recorded none
     /// is refused, so no command guesses which rows trained; `camdl predict`
-    /// reads its parameter set through this in every mode.
+    /// reads its training rows through this in every mode.
     pub(crate) fn read_recorded(
         segment: &std::path::Path,
         rows: &BTreeMap<String, Vec<ObservedRow>>,

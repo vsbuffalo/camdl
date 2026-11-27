@@ -104,9 +104,10 @@ impl RowRole {
     }
 }
 
-/// The fit's parameter set as `camdl predict` reads it: the training partition
-/// the fit recorded, verified against the bound files as they are now.
-struct ParameterSet {
+/// The fit's training rows as `camdl predict` reads them: the training
+/// partition the fit recorded, verified against the bound files as they are
+/// now.
+struct TrainingRows {
     /// The record as the fit wrote it; `predictive.json` carries it as
     /// `forecast.json` does.
     record: crate::run_meta::TrainingPartitionRecord,
@@ -126,7 +127,7 @@ struct ParameterSet {
     training_unknown: bool,
 }
 
-impl ParameterSet {
+impl TrainingRows {
     /// Read the partition `recorded` names and check it against
     /// the rows of every stream the fit bound (not only the streams this
     /// predict covers: the recorded training extent spans them all).
@@ -182,7 +183,7 @@ impl ParameterSet {
             crate::fit::training_partition::RecordedPartition::Given(r)
                 if r.rule == crate::run_meta::PartitionRuleRecord::All
         );
-        Ok(ParameterSet { record, partition, holdout_sources, held_out_times, training_unknown })
+        Ok(TrainingRows { record, partition, holdout_sources, held_out_times, training_unknown })
     }
 
     /// The role of a predicted row past the stream's data rows, at time `t`:
@@ -202,7 +203,7 @@ impl ParameterSet {
     }
 }
 
-/// One stream's part of the one-step state set: the rows the filter walked,
+/// One stream's part of the one-step conditioning rows: the rows the filter walked,
 /// and how many of them the fit held out.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 struct FilteredStream {
@@ -3255,11 +3256,11 @@ fn run_predict(
     // what each row covers — resolved against the compiled model's projections).
     // Every eligible leaf is bound, so none is empty here.
     let leaves = load_leaf_obs(&model, &compiled, &config, dt, &streams_in)?;
-    // The parameter set (gh#1079): which rows the fit's parameters were fitted
-    // to, read from the fit's record and checked against the files. Every
+    // The training rows: which rows the fit's parameters were fitted to,
+    // read from the fit's record and checked against the files. Every
     // predictive row's `role` is read off it, and a fit that recorded none is
     // refused here, before anything is computed.
-    let parameter_set = ParameterSet::read(&model, &compiled, &config, dt, &partition, &held_out)?;
+    let training_rows = TrainingRows::read(&model, &compiled, &config, dt, &partition, &held_out)?;
     let seed = args.flags.seed.unwrap_or(1);
 
     // Build the generated-quantities evaluator once (the IR is fixed across draws);
@@ -4023,13 +4024,13 @@ fn run_predict(
                         sweep: sweep_pt.clone(),
                         scenario: scenario_name.clone(),
                         bands: assemble_predictive(
-                            &model, accum, &ff_emit_times, &leaves, &parameter_set,
+                            &model, accum, &ff_emit_times, &leaves, &training_rows,
                             schema.as_ref(), args.posterior.by_chain,
                         )?,
                     });
                     if let Some(o) = &ff_outcomes {
                         ff_scored.cells.extend(free_forward_scored(
-                            &model, accum, o, &ff_emit_times, &leaf_coverages, &leaf_times, &parameter_set,
+                            &model, accum, o, &ff_emit_times, &leaf_coverages, &leaf_times, &training_rows,
                             scenario_name, sweep_pt,
                         ));
                     }
@@ -4117,7 +4118,7 @@ fn run_predict(
             seed,
             schema.as_ref(),
             args.posterior.by_chain,
-            &parameter_set,
+            &training_rows,
             binding,
         )?),
         None => None,
@@ -4378,11 +4379,11 @@ fn run_predict(
             // absent when no filter ran.
             "particles": one_step_fit.is_some().then_some(particles),
             // The two information sets (`docs/engineering/forecasting.md`
-            // §1.4). The training rows are the fit's recorded training
+            // §1.3). The training rows are the fit's recorded training
             // partition, as `forecast.json` carries it: the rule, the training
             // extent and each stream's training rows. A row's `role` is its
             // position against that stream's `rows`.
-            "training_rows": &parameter_set.record,
+            "training_rows": &training_rows.record,
             // The conditioning rows of each section written, keyed by its
             // `mode` value: the rows the latent state behind a band was
             // conditioned on.
@@ -4393,8 +4394,8 @@ fn run_predict(
             // cover is `future`. `holdout_after` and `[data.holdout]`
             // describing one split therefore do not yet give one record
             // (gh#1309). `null` without `[data.holdout]`.
-            "holdout_files": (!parameter_set.holdout_sources.is_empty()).then(|| serde_json::json!({
-                "read": false, "sources": &parameter_set.holdout_sources,
+            "holdout_files": (!training_rows.holdout_sources.is_empty()).then(|| serde_json::json!({
+                "read": false, "sources": &training_rows.holdout_sources,
             })),
             "streams": predictive_manifest_entries,
             // D76: which declared streams (leaves) this artifact holds, which it
@@ -4611,7 +4612,7 @@ fn free_forward_scored(
     emit_times: &[Vec<f64>],
     coverages: &[Vec<(f64, score::trace::Coverage)>],
     leaf_times: &[Vec<f64>],
-    parameter_set: &ParameterSet,
+    training_rows: &TrainingRows,
     scenario: &str,
     sweep: &[(String, f64)],
 ) -> Vec<crate::fit::scoring::ScoredCell> {
@@ -4625,8 +4626,8 @@ fn free_forward_scored(
                 score::trace::Coverage::Instant | score::trace::Coverage::Unrecorded => (emit_times[si][ti], emit_times[si][ti]),
             };
             let role = if ti < leaf_times[si].len() {
-                parameter_set.role(&o.name, ti)
-            } else if parameter_set.training_unknown {
+                training_rows.role(&o.name, ti)
+            } else if training_rows.training_unknown {
                 RowRole::Unknown
             } else {
                 RowRole::HeldOut
@@ -4876,7 +4877,7 @@ fn assemble_predictive(
     accum: &ScenarioAccum,
     emit_times: &[Vec<f64>],
     leaves: &[LeafObs],
-    parameter_set: &ParameterSet,
+    training_rows: &TrainingRows,
     schema: Option<&ObsSchema>,
     by_chain: bool,
 ) -> Result<Vec<StreamBands>, String> {
@@ -4918,9 +4919,9 @@ fn assemble_predictive(
             for (ti, draws_at_t) in accum.samples[si].iter().enumerate() {
                 let t = emit_times[si][ti];
                 let role = if ti < n_data_rows {
-                    parameter_set.role(leaf_name, ti)
+                    training_rows.role(leaf_name, ti)
                 } else {
-                    parameter_set.role_past_data(leaf_name, t)
+                    training_rows.role_past_data(leaf_name, t)
                 };
                 rows.push(
                     band_row(
@@ -5399,7 +5400,7 @@ struct OneStepBands {
     /// appears here with what it actually pooled, so its `n_draws` cell never
     /// claims a full band; a chain that lost all of them is absent.
     n_pooled_by_chain: BTreeMap<usize, usize>,
-    /// The state set: per leaf stream, sorted by name, the rows every band's
+    /// The conditioning rows: per leaf stream, sorted by name, the rows every band's
     /// filter walked and how many of them the fit held out.
     filtered: Vec<FilteredStream>,
     /// With outcomes bound, every row the pass predicted whose outcome is
@@ -5651,7 +5652,7 @@ fn one_step_bands(
     base_seed: u64,
     schema: Option<&ObsSchema>,
     by_chain: bool,
-    parameter_set: &ParameterSet,
+    training_rows: &TrainingRows,
     binding: Option<&crate::fit::scoring::OutcomeBinding>,
 ) -> Result<OneStepBands, String> {
     use sim::inference::{
@@ -5735,12 +5736,13 @@ fn one_step_bands(
             .into());
     }
 
-    // The state set (gh#1079): the filter below walks every row of every
+    // The conditioning rows: the filter below walks every row of every
     // stream here, the held-out ones included, so that is what each band's
     // state was conditioned on. And where each row's value is assimilated
     // (the end of what it measures), to find a filter stop's row again.
-    // A band is written for the conditioning rows alone, so the state set is
-    // theirs whether or not a score continued the pass past them.
+    // A band is written for the conditioning rows alone, so the rows
+    // recorded are theirs whether or not a score continued the pass past
+    // them.
     let mut filtered: Vec<FilteredStream> = obs_streams
         .iter()
         .map(|s| {
@@ -5748,7 +5750,7 @@ fn one_step_bands(
             Ok(FilteredStream {
                 stream: s.name.clone(),
                 rows: rows.len(),
-                held_out_rows: rows.len().saturating_sub(parameter_set.partition.rows(&s.name)),
+                held_out_rows: rows.len().saturating_sub(training_rows.partition.rows(&s.name)),
                 digest: crate::fit::training_partition::row_digest(rows)?.to_hex(),
             })
         })
@@ -5983,7 +5985,7 @@ fn one_step_bands(
                 }
                 let quantiles = band(&cell)
                     .map_err(|e| format!("stream '{source}' (one_step) at t={t}: {e}"))?;
-                let role = parameter_set.role(&stream_names[si], position);
+                let role = training_rows.role(&stream_names[si], position);
                 // No per-row R̂ on the one-step horizon (gh#794). Its cell is a
                 // pool over (posterior draws × filter particles), so the
                 // sequence a chain contributes is not the posterior chain and an
@@ -6032,7 +6034,7 @@ fn one_step_bands(
     }
 
     let scored = match binding {
-        Some(_) => one_step_scored(&obs_streams, &leaf_of_name, &stream_names, &obs_times, &records, parameter_set)?,
+        Some(_) => one_step_scored(&obs_streams, &leaf_of_name, &stream_names, &obs_times, &records, training_rows)?,
         None => crate::fit::scoring::Scored::default(),
     };
     Ok(OneStepBands { streams, n_pooled, n_pooled_by_chain, filtered, scored })
@@ -6048,7 +6050,7 @@ fn one_step_scored(
     stream_names: &[String],
     obs_times: &[f64],
     records: &[Option<DrawRecord>],
-    parameter_set: &ParameterSet,
+    training_rows: &TrainingRows,
 ) -> Result<crate::fit::scoring::Scored, String> {
     use crate::fit::scoring::{JointCell, ScoreMode, ScoredCell, Scored};
     use crate::quantile::fmt_time;
@@ -6120,7 +6122,7 @@ fn one_step_scored(
                 origin: None,
                 periods_ahead: None,
                 lead,
-                role: parameter_set.role(name, position),
+                role: training_rows.role(name, position),
                 observed: y,
                 samples,
                 log_liks,

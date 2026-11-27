@@ -571,9 +571,9 @@ pub(crate) fn declared_read(
     Ok((si, ui))
 }
 
-/// The state set: the rows of each stream handed to the filter, which must be
-/// the training prefix the parameter set records, and end at or before the
-/// origin.
+/// The conditioning rows: the rows of each stream handed to the filter, which
+/// must be the training prefix the training partition records, and end at or
+/// before the origin.
 fn conditioning(plan: &ForecastPlan, training: &[ObsStream]) -> Result<StateConditioning, ForecastFailure> {
     let mut rows = Vec::with_capacity(training.len());
     let mut through = f64::NEG_INFINITY;
