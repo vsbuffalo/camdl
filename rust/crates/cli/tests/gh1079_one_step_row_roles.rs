@@ -192,10 +192,10 @@ fn rows_past_the_training_prefix_are_held_out_and_the_manifest_names_both_sets()
     assert_eq!(at("role"), at("treatment") + 1, "{h:?}");
 
     let m = read_json(&out.join("predictive.json"));
-    assert_eq!(m["schema"], "camdl.predictive/v6");
+    assert_eq!(m["schema"], "camdl.predictive/v7");
     for s in m["streams"].as_array().unwrap() {
         let coords: Vec<&str> = s["coordinates"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
-        assert_eq!(&coords[coords.len() - 5..], ["mode", "periods_ahead", "treatment", "role", "quantity"], "{s}");
+        assert_eq!(&coords[coords.len() - 4..], ["mode", "treatment", "role", "quantity"], "{s}");
     }
     // The parameter set: the partition the fit recorded.
     let p = &m["training_rows"];

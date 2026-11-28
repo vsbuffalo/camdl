@@ -221,34 +221,33 @@ thin = 1
     let header = lines.next().unwrap();
     assert_eq!(
         header,
-        "scenario\ttime\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\tmode\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "predictive header leads with the scenario overlay axis, then both axes + convergence + band"
     );
     let first = lines.next().expect("at least one predictive row");
     let cols: Vec<&str> = first.split('\t').collect();
-    assert_eq!(cols.len(), 19, "row shape matches header");
+    assert_eq!(cols.len(), 18, "row shape matches header");
     assert_eq!(cols[0], "fitted", "no --scenario → the no-overlay row tagged fitted");
     assert_eq!(cols[2], "free_forward", "mode axis is explicit");
-    assert_eq!(cols[3], "", "no forecast origin, so no horizon");
-    assert_eq!(cols[4], "posterior", "treatment axis is explicit (not a plug-in)");
+    assert_eq!(cols[3], "posterior", "treatment axis is explicit (not a plug-in)");
     // gh#1079: this fit declares no holdout, so every data row trained.
-    assert_eq!(cols[5], "trained", "the row's role in the fit");
-    assert_eq!(cols[6], "observation", "the band is of the observation");
+    assert_eq!(cols[4], "trained", "the row's role in the fit");
+    assert_eq!(cols[5], "observation", "the band is of the observation");
     // rhat_max is carried (a finite number), never silently blank for a PGAS fit.
     assert!(
-        cols[7].parse::<f64>().is_ok(),
+        cols[6].parse::<f64>().is_ok(),
         "rhat_max carried on the band, got {:?}",
-        cols[7]
+        cols[6]
     );
     // n_draws is a positive count of the cloud the band was reduced over. It
     // sits after the four per-row convergence cells (gh#794).
     assert!(
-        cols[13].parse::<usize>().map(|n| n > 0).unwrap_or(false),
+        cols[12].parse::<usize>().map(|n| n > 0).unwrap_or(false),
         "n_draws carried and positive, got {:?}",
-        cols[13]
+        cols[12]
     );
     // The quantile band is monotone non-decreasing q05 ≤ q25 ≤ … ≤ q95.
-    let qs: Vec<f64> = cols[14..19].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    let qs: Vec<f64> = cols[13..18].iter().map(|s| s.parse::<f64>().unwrap()).collect();
     for w in qs.windows(2) {
         assert!(w[0] <= w[1], "quantiles must be ordered: {qs:?}");
     }
@@ -268,18 +267,18 @@ thin = 1
     // A one-step row is well-formed: fitted scenario, posterior treatment,
     // positive n_draws, ordered quantile band.
     let osr: Vec<&str> = one_step_rows[0].split('\t').collect();
-    assert_eq!(osr.len(), 19, "one_step row shape matches header");
+    assert_eq!(osr.len(), 18, "one_step row shape matches header");
     assert_eq!(osr[0], "fitted", "one_step is scenario-agnostic (fitted model)");
     assert_eq!(osr[2], "one_step", "mode axis");
-    assert_eq!(osr[4], "posterior", "one-step is a posterior-treatment band");
-    assert_eq!(osr[5], "trained", "no holdout: every one-step row trained");
-    assert_eq!(osr[6], "observation", "the band is of the observation");
+    assert_eq!(osr[3], "posterior", "one-step is a posterior-treatment band");
+    assert_eq!(osr[4], "trained", "no holdout: every one-step row trained");
+    assert_eq!(osr[5], "observation", "the band is of the observation");
     assert!(
-        osr[13].parse::<usize>().map(|n| n > 0).unwrap_or(false),
+        osr[12].parse::<usize>().map(|n| n > 0).unwrap_or(false),
         "one_step n_draws carried and positive (the subsample used), got {:?}",
-        osr[13]
+        osr[12]
     );
-    let osq: Vec<f64> = osr[14..19].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    let osq: Vec<f64> = osr[13..18].iter().map(|s| s.parse::<f64>().unwrap()).collect();
     for w in osq.windows(2) {
         assert!(w[0] <= w[1], "one_step quantiles must be ordered: {osq:?}");
     }
@@ -409,7 +408,7 @@ thin = 1
     // one store hold different quantities. v3 renames them `fit_rhat_max` /
     // `fit_ess_min` and adds the per-row channels (gh#794). v4 adds the `role`
     // coordinate and the two information sets (gh#1079).
-    assert_eq!(pjson["schema"], "camdl.predictive/v6", "predictive manifest schema tag");
+    assert_eq!(pjson["schema"], "camdl.predictive/v7", "predictive manifest schema tag");
     let streams = pjson["streams"].as_array().expect("streams array");
     let wc = streams
         .iter()
@@ -422,7 +421,7 @@ thin = 1
     // predictive TSV header's join keys.
     let coords: Vec<&str> = wc["coordinates"].as_array().unwrap()
         .iter().map(|c| c.as_str().unwrap()).collect();
-    assert_eq!(coords, ["scenario", "time", "mode", "periods_ahead", "treatment", "role", "quantity"],
+    assert_eq!(coords, ["scenario", "time", "mode", "treatment", "role", "quantity"],
         "coordinate columns name the group-by keys, in header order");
     let band: Vec<&str> = wc["band"].as_array().unwrap()
         .iter().map(|c| c.as_str().unwrap()).collect();
@@ -535,7 +534,7 @@ thin = 1
     let mut lines = pred_txt.lines();
     assert_eq!(
         lines.next().unwrap(),
-        "scenario\ttime\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\tmode\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "one header, scenario leads"
     );
     let scenarios_seen: std::collections::BTreeSet<&str> =

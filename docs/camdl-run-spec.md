@@ -1010,7 +1010,7 @@ tables stay on the declared output grid.
 
 ```
 <run folder>/predict/<mode>-<12 hex>/predictive/<stream>.tsv
-  scenario | sweep:<param>… | time | <dims…> | mode | periods_ahead | treatment
+  scenario | sweep:<param>… | time | <dims…> | mode | treatment
            | role
            | quantity | fit_rhat_max | fit_ess_min
            | rhat_mean | ess_mean | rhat_pred | ess_pred
@@ -1029,15 +1029,14 @@ predictive cell is more rows and never new consumer code. The `mode` column is
 draw and pooling over particles × draws); both stack under one header. The two
 modes walk the step the fit ran at — the model's declared `dt` when it has one
 (the one dt rule), else the fit's `[config] dt` — since either mode on another
-step would replay a different process than the posterior describes.
-`periods_ahead` counts how many of its stream's periods a forecast target is
-ahead of its origin, from 1 (as in `forecast/<stream>.tsv`), and is empty on
-every row here, since neither mode has an origin. `quantity` says what a band is
-of: `observation`, a draw `y` from the observation model, on every row
-`camdl predict` writes; `expectation`, the observation model's mean
-`E[y | x, θ]` with no observation noise drawn, is the other value, written by
-`pfilter --save-filtered-streams`. Observed data are compared with an
-`observation` band; an `expectation` band is narrower by the observation noise.
+step would replay a different process than the posterior describes. Neither mode
+has a forecast origin, so the file has no `periods_ahead` or `lead` column.
+`quantity` says what a band is of: `observation`, a draw `y` from the
+observation model, on every row `camdl predict` writes; `expectation`, the
+observation model's mean `E[y | x, θ]` with no observation noise drawn, is the
+other value, written by `pfilter --save-filtered-streams`. Observed data are
+compared with an `observation` band; an `expectation` band is narrower by the
+observation noise.
 
 **Each row carries its role in the fit.** The `role` column is `trained` for a
 row of the fit's training prefix of its stream (an `NA` row included),
@@ -1183,7 +1182,7 @@ tidy keys. A hole — a scheduled but unobserved cell — renders as an empty
 per stratum, using `index_dims` from the `fit.meta.json` schema and no
 run-store, DSL, or likelihood knowledge.
 
-`predictive.json` (schema tag `camdl.predictive/v6`) records the `run_id` whose
+`predictive.json` (schema tag `camdl.predictive/v7`) records the `run_id` whose
 draws it replays and declares, per stream, which columns are join coordinates
 versus band versus per-cell diagnostics, the `value_kind`, and the band's
 quantile levels; it also carries a `chain_selection` block when
@@ -1206,6 +1205,7 @@ The versions do not carry the same numbers under the same column names:
 | `v4` | `fit_rhat_max`, `fit_ess_min`            | the v3 statistics; the `role` coordinate is added after `treatment`, and the manifest gains `parameter_set` and `state_sets`                                                            |
 | `v5` | `fit_rhat_max`, `fit_ess_min`            | the v4 statistics; the mode-valued `horizon` column is renamed `mode`, `horizon` holds a forecast target's position (empty here), `quantity` follows `role`, and `role` gains `unknown` |
 | `v6` | `fit_rhat_max`, `fit_ess_min`            | the v5 statistics; the `horizon` column is renamed `periods_ahead`, and the manifest's `parameter_set` and `state_sets` are renamed `training_rows` and `conditioning_rows`             |
+| `v7` | `fit_rhat_max`, `fit_ess_min`            | the v6 statistics; the `periods_ahead` column, empty on every row, is removed                                                                                                           |
 
 The v1 → v2 row is why the tag exists at all: the estimator changed and the
 column names did not, so for those two versions the tag is the _only_ signal
@@ -6086,10 +6086,10 @@ wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/o
 ```
 
 ```
-$ cut -f1-7 camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive/weekly_cases.tsv | head -3
-scenario	time	mode	periods_ahead	treatment	role	quantity
-fitted	0	free_forward		posterior	trained	observation
-fitted	7	free_forward		posterior	trained	observation
+$ cut -f1-6 camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive/weekly_cases.tsv | head -3
+scenario	time	mode	treatment	role	quantity
+fitted	0	free_forward	posterior	trained	observation
+fitted	7	free_forward	posterior	trained	observation
 ```
 
 (`cut` keeps the excerpt narrow; the full row continues with `fit_rhat_max`,
@@ -7533,7 +7533,7 @@ camdl predict @posterior
 It emits, under the run's `predict/<mode>-<12 hex>/` (§2.2.2):
 
 ```
-predictive/<stream>.tsv   time | <dims…> | mode | periods_ahead | treatment | role
+predictive/<stream>.tsv   time | <dims…> | mode | treatment | role
                           | quantity
                           | fit_rhat_max | fit_ess_min
                           | rhat_mean | ess_mean | rhat_pred | ess_pred

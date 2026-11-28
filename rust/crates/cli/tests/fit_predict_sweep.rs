@@ -214,7 +214,7 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     let header = pred_txt.lines().next().unwrap();
     assert_eq!(
         header,
-        "scenario\tsweep:k\ttime\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\tsweep:k\ttime\tmode\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "the sweep:k column follows the scenario column"
     );
 
@@ -308,7 +308,7 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     let coords: Vec<&str> = wc["coordinates"].as_array().unwrap()
         .iter().map(|c| c.as_str().unwrap()).collect();
     assert_eq!(
-        coords, ["scenario", "sweep:k", "time", "mode", "periods_ahead", "treatment", "role", "quantity"],
+        coords, ["scenario", "sweep:k", "time", "mode", "treatment", "role", "quantity"],
         "the manifest names sweep:k as a coordinate, after scenario; saw {coords:?}"
     );
 
@@ -395,7 +395,7 @@ fn fit_predict_no_sweep_header_is_byte_identical() {
     let header = pred_txt.lines().next().unwrap();
     assert_eq!(
         header,
-        "scenario\ttime\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\tmode\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "no --sweep ⇒ no sweep: column ⇒ byte-identical header"
     );
     assert!(

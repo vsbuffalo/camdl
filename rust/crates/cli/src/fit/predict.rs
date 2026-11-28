@@ -723,14 +723,12 @@ pub struct PredictiveSection<'a> {
 }
 
 /// Render `predictive/<stream>.tsv`: `scenario | time | <dims…> | mode |
-/// periods_ahead | treatment | role | quantity | fit_rhat_max | fit_ess_min |
-/// rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 … q95`. Tidy,
+/// treatment | role | quantity | fit_rhat_max | fit_ess_min | rhat_mean |
+/// ess_mean | rhat_pred | ess_pred | n_draws | q05 … q95`. Tidy,
 /// plot-ready; the axes and the convergence channels are columns so a new
 /// predictive cell — a new scenario, a new mode, a new treatment — is more
 /// rows, never new consumer code. Several [`PredictiveSection`]s (one per
-/// (scenario, mode)) stack under the single header. `periods_ahead`, how
-/// many of its stream's periods a forecast target is ahead of its origin, is
-/// empty: neither mode written here has an origin.
+/// (scenario, mode)) stack under the single header.
 ///
 /// Two convergence channels sit side by side and must not be confused (gh#794).
 /// `fit_rhat_max`/`fit_ess_min` are the *producing method's* worst-parameter numbers,
@@ -774,7 +772,7 @@ pub fn render_predictive_tsv_sections(
         out.push_str(d);
     }
     out.push_str(
-        "\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
+        "\tmode\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
          \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws",
     );
     for (_, label) in QUANTILE_LEVELS {
@@ -810,8 +808,6 @@ pub fn render_predictive_tsv_sections(
             }
             out.push('\t');
             out.push_str(section.mode.as_str());
-            // `periods_ahead`: empty, as no row here has a forecast origin.
-            out.push('\t');
             out.push('\t');
             out.push_str(section.treatment.label());
             out.push('\t');
@@ -4288,7 +4284,7 @@ fn run_predict(
         // Record this stream's join contract for `predictive.json`. Coordinate
         // columns (the group-by keys) in header order: the `chain` column when
         // `--by-chain` wrote one, `scenario`, the `sweep:<param>` columns,
-        // `time`, the stratum dims, `mode`, `periods_ahead`, `treatment`, `role`,
+        // `time`, the stratum dims, `mode`, `treatment`, `role`,
         // `quantity`. The band columns are
         // the quantile labels; the diagnostics
         // are the method-provenance pair (`fit_rhat_max` / `fit_ess_min`, constant down
@@ -4305,7 +4301,6 @@ fn run_predict(
         coordinates.push("time".to_string());
         coordinates.extend(index_dims.iter().cloned());
         coordinates.push("mode".to_string());
-        coordinates.push("periods_ahead".to_string());
         coordinates.push("treatment".to_string());
         coordinates.push("role".to_string());
         coordinates.push("quantity".to_string());
@@ -5024,7 +5019,7 @@ fn band_row(
 pub(crate) const DEFAULT_PREDICT_DRAWS: usize = 200;
 
 /// The `schema` tag of `predictive.json`.
-pub(crate) const PREDICTIVE_SCHEMA: &str = "camdl.predictive/v6";
+pub(crate) const PREDICTIVE_SCHEMA: &str = "camdl.predictive/v7";
 
 /// Every input that changes what `camdl predict` writes, beyond the run it
 /// reads, resolved to the values the predict used. Together with the run and
@@ -7261,12 +7256,12 @@ mod tests {
         );
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(lines[0],
-            "scenario\ttime\tpatch\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
+            "scenario\ttime\tpatch\tmode\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
         assert_eq!(lines[1],
-            "fitted\t7\tBo\tfree_forward\t\tposterior\ttrained\tobservation\t1.0100\t420\t\t\t\t\t40\t0\t1\t3\t6\t12");
+            "fitted\t7\tBo\tfree_forward\tposterior\ttrained\tobservation\t1.0100\t420\t\t\t\t\t40\t0\t1\t3\t6\t12");
         assert_eq!(lines[2],
-            "fitted\t7\tBombali\tfree_forward\t\tposterior\ttrained\tobservation\t1.0100\t420\t\t\t\t\t40\t0\t0\t1\t3\t7");
+            "fitted\t7\tBombali\tfree_forward\tposterior\ttrained\tobservation\t1.0100\t420\t\t\t\t\t40\t0\t0\t1\t3\t7");
         assert_eq!(lines.len(), 3, "header + one row per (time, stratum)");
     }
 
@@ -7296,9 +7291,9 @@ mod tests {
         // No dim column; not-assessed rhat/ess are empty cells, not fabricated
         // values; n_draws is still carried. Scenario leads.
         assert_eq!(lines[0],
-            "scenario\ttime\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
+            "scenario\ttime\tmode\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
-        assert_eq!(lines[1], "fitted\t1\tfree_forward\t\tposterior\ttrained\tobservation\t\t\t\t\t\t\t12\t1\t2\t3\t4\t5");
+        assert_eq!(lines[1], "fitted\t1\tfree_forward\tposterior\ttrained\tobservation\t\t\t\t\t\t\t12\t1\t2\t3\t4\t5");
     }
 
     #[test]
@@ -7349,17 +7344,17 @@ mod tests {
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(
             lines[0],
-            "scenario\tsweep:k\ttime\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
+            "scenario\tsweep:k\ttime\tmode\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
             "sweep:k column follows scenario"
         );
         assert_eq!(lines[1],
-            "fitted\t8\t7\tfree_forward\t\tposterior\ttrained\tobservation\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
+            "fitted\t8\t7\tfree_forward\tposterior\ttrained\tobservation\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
         assert_eq!(lines[2],
-            "fitted\t12\t7\tfree_forward\t\tposterior\ttrained\tobservation\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
+            "fitted\t12\t7\tfree_forward\tposterior\ttrained\tobservation\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
         // One-step row: the sweep:k cell is blank (empty), not a fabricated value.
         assert_eq!(lines[3],
-            "fitted\t\t7\tone_step\t\tposterior\ttrained\tobservation\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
+            "fitted\t\t7\tone_step\tposterior\ttrained\tobservation\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
     }
 
     #[test]
