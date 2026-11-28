@@ -6016,8 +6016,9 @@ fn one_step_scored(
 /// the filter had assimilated when it predicted the rows ending there. At
 /// each stop the filter predicts every row that ends there before it
 /// assimilates those with a value, so a row ending at the same stop does not
-/// count; an `NA` row and a held-out cell are never assimilated. `None` where
-/// no row was assimilated before the stop.
+/// count, and neither does a row without a value, such as an `NA` row. In a
+/// score the held-out rows carry their outcomes, so they count for the rows
+/// after them. `None` where no row was assimilated before the stop.
 fn assimilated_through(obs_streams: &[crate::fit::runner::ObsStream], stream_names: &[String], obs_times: &[f64]) -> Vec<Option<f64>> {
     // The latest end of a row with a value at each stop.
     let mut at: Vec<Option<f64>> = vec![None; obs_times.len()];
