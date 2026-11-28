@@ -674,10 +674,33 @@ pub(crate) fn run_forecast(out: &crate::out::Out, job: ForecastJob) -> Result<Fo
         fc.plan.origin(), fc.plan.origin() + fc.plan.horizon(), fc.plan.targets().len(),
         fc.plan.sources().len(), fc.n_draws, fc.n_particles, forecasts.len()));
     let scored = match job.binding {
-        Some(_) => scored_targets(&forecasts, &held_out_values, model),
+        Some(b) => {
+            let mut scored = scored_targets(&forecasts, &held_out_values, model);
+            scored.notes.extend(unmatched_outcomes(&plan, b));
+            scored
+        }
         None => crate::fit::scoring::Scored::default(),
     };
     Ok(ForecastRun { out_dir, written, failures, skipped, options, scored })
+}
+
+/// One note per stream with outcome rows after the conditioning rows that
+/// hold a value and measure no target of `plan` (a row past the horizon, or
+/// one whose period no target shares), saying how many are not scored. A row
+/// holding `NA` is not counted: it is not scored in any mode.
+fn unmatched_outcomes(plan: &ForecastPlan, outcomes: &crate::fit::scoring::OutcomeBinding) -> Vec<String> {
+    outcomes.rows.keys()
+        .filter_map(|stream| {
+            let n = outcomes.after_conditioning(stream).iter()
+                .filter(|r| matches!(r.cell, Some(sim::inference::ObsCell::Scalar(_))))
+                .filter(|r| !plan.targets().iter()
+                    .any(|t| &t.stream == stream && crate::fit::forecast_plan::same_span(&r.measures, &t.measures)))
+                .count();
+            (n > 0).then(|| format!(
+                "{n} outcome row(s) of '{stream}' past the prediction's data are not scored in \
+                 forecast mode: the forecast has no target measuring their period"))
+        })
+        .collect()
 }
 
 /// Each arm's targets that hold an outcome, as scored cells: every sample's

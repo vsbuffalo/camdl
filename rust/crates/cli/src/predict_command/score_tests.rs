@@ -854,3 +854,33 @@ fn assimilated_through_skips_an_na_row_and_counts_a_held_out_one() {
     let rows = tsv_rows(&read(&ff, "scored_rows.tsv"));
     assert!(!rows.is_empty() && rows.iter().all(|r| r["mode"] == "free_forward" && r["assimilated_through"].is_empty()), "{rows:?}");
 }
+
+/// An outcome row after the conditioning rows that measures no target of a
+/// forecast, here one past the horizon, is not scored, and the score names
+/// how many such rows each stream has; the rows that measure a target are
+/// scored.
+#[test]
+fn an_outcome_row_past_a_forecasts_horizon_is_named_as_not_scored() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--horizon",
+            "5 days", "--n-draws", "2", "--particles", "10", "--holdout-after", "20", "--label", "fc",
+        ]),
+        "predict",
+    );
+    // The header and the rows of days 1 to 26: the targets end at days 21 to
+    // 25, so day 26 is the one row past the horizon.
+    let daily = std::fs::read_to_string(cwd.path().join("daily_cases.tsv")).unwrap();
+    let through_26: String = daily.lines().take(27).map(|l| format!("{l}\n")).collect();
+    assert!(through_26.lines().last().unwrap().starts_with("26\t"), "{through_26}");
+    std::fs::write(cwd.path().join("through_26.tsv"), through_26).unwrap();
+    let err = ok(&score_in(cwd.path(), &root, &["@fc", "--data", "daily_cases=through_26.tsv"]), "score");
+    assert!(err.contains("score: 5 row(s) scored"), "{err}");
+    assert!(
+        err.contains("score: 1 outcome row(s) of 'daily_cases' past the prediction's data are not scored in forecast mode"),
+        "{err}"
+    );
+}

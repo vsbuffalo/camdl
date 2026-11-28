@@ -1574,7 +1574,9 @@ What is scored, by mode:
   prediction (§2.2.2).
 - **Forecast.** Each target whose period an outcome row measures: the
   observation density at each particle at the target's end, recorded before
-  anything could be assimilated there.
+  anything could be assimilated there. An outcome row past the prediction's data
+  that measures no target's period (a row past the horizon) is not scored, and
+  is named in `score.json`'s notes.
 
 **Rules.** For one row, with `S = M·N` samples (`M` draws, `N` particles per
 draw; `N = 1` for free-forward):
