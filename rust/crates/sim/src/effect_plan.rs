@@ -54,33 +54,71 @@ pub enum Origin {
     Resumed,
 }
 
-/// One effect whose firing step the shortened-last-step rule chose, not the
-/// nominal grid key: the run's length rather than the grid decided the instant,
-/// so the modeller is told. Carried on the plan (so a test can read it) and
-/// recorded once per process by [`EffectPlan::build`]
+/// One effect that a Grid run fires at a different instant from the one it
+/// declares, so the modeller is told. Carried on the plan (so a test can read
+/// it) and recorded by [`EffectPlan::build`]
 /// ([`crate::run_notes::RunNote::EffectSnapped`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapNote {
     /// The effect's name.
     pub effect: String,
-    /// Its declared fire time.
+    /// Its declared fire time (under [`SnapCause::OffGrid`], the earliest of
+    /// its declared times that moved).
     pub declared: f64,
-    /// The step boundary it fires at (`t_end`).
+    /// The step end it fires at.
     pub fires_at: f64,
-    /// Where the nominal grid key would have fired it (a grid point the
-    /// shortened last step never reaches the far side of).
-    pub nominal: f64,
+    /// Which rule moved it.
+    pub cause: SnapCause,
+}
+
+/// Why a Grid run fires an effect away from its declared time.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SnapCause {
+    /// The declared time lies off the grid `t_start + k·dt`, and the effect
+    /// fires at the nearest step end ([`fire_step`]). One note covers every
+    /// declared time of the effect this moved.
+    OffGrid {
+        t_start: f64,
+        dt: f64,
+        /// How many of the effect's fire times in the window moved.
+        n_moved: usize,
+        /// How many of the effect's fire times lie in the window.
+        n_fires: usize,
+    },
+    /// The declared time falls in the run's shortened last step (`t_end` off
+    /// the grid), and the effect fires at the nearer of that step's two ends,
+    /// not at `nominal`, the grid point the nominal key names, which the last
+    /// step never reaches the far side of.
+    ShortenedLastStep { nominal: f64 },
 }
 
 impl std::fmt::Display for SnapNote {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "effect `{}` declared at t = {} falls in the run's shortened last step and \
-             fires at t = {}, the step boundary nearest it (the run ends at {}, off the \
-             dt grid; the nearest grid point, t = {}, is not a step end of this run)",
-            self.effect, self.declared, self.fires_at, self.fires_at, self.nominal,
-        )
+        match &self.cause {
+            SnapCause::OffGrid { t_start, dt, n_moved, n_fires } => {
+                write!(
+                    f,
+                    "effect `{}` declared at t = {} fires at t = {}: chain-binomial steps on \
+                     the grid t_start + k·dt (t_start = {t_start}, dt = {dt}) and applies an \
+                     effect at the end of the step nearest its declared time",
+                    self.effect, self.declared, self.fires_at,
+                )?;
+                if *n_moved > 1 {
+                    write!(
+                        f,
+                        " ({n_moved} of its {n_fires} fire times lie off the grid; this is the first)"
+                    )?;
+                }
+                write!(f, ". A dt that divides each of the effect's times from t_start fires it where it is declared.")
+            }
+            SnapCause::ShortenedLastStep { nominal } => write!(
+                f,
+                "effect `{}` declared at t = {} falls in the run's shortened last step and \
+                 fires at t = {}, the step boundary nearest it (the run ends at {}, off the \
+                 dt grid; the nearest grid point, t = {}, is not a step end of this run)",
+                self.effect, self.declared, self.fires_at, self.fires_at, nominal,
+            ),
+        }
     }
 }
 
@@ -101,7 +139,7 @@ pub struct EffectPlan {
     steps: Vec<u64>,
     /// The effects firing at `times[i]`, declaration order.
     batches: Vec<Vec<usize>>,
-    /// Effects the shortened-last-step rule placed (Grid only).
+    /// Effects fired away from their declared time (Grid only).
     notes: Vec<SnapNote>,
 }
 
@@ -218,20 +256,40 @@ impl EffectPlan {
             // declared times share it (gh#198): a discrete-time model has one
             // boundary per step.
             let mut keys: Vec<u64> = Vec::new();
+            let name = &model.model.interventions[iv_idx].name;
+            // The earliest declared time the nearest-step rule moved and where
+            // it fires, and how many it moved, for the effect's one off-grid note.
+            let mut first_moved: Option<(f64, f64)> = None;
+            let (mut n_moved, mut n_fires) = (0usize, 0usize);
             for &t in times {
                 let Some((k, refined)) = grid_key(t, t_start, dt, t_end) else { continue };
+                n_fires += 1;
+                let fires_at = step_end(k, n, t_start, dt, t_end);
                 if refined {
                     let nominal_k = ((t - t_start) / dt + 0.5 + GRID_TOL).floor().max(0.0) as u64;
                     notes.push(SnapNote {
-                        effect: model.model.interventions[iv_idx].name.clone(),
+                        effect: name.clone(),
                         declared: t,
-                        fires_at: step_end(k, n, t_start, dt, t_end),
-                        nominal: t_start + nominal_k as f64 * dt,
+                        fires_at,
+                        cause: SnapCause::ShortenedLastStep { nominal: t_start + nominal_k as f64 * dt },
                     });
+                } else if ((t - fires_at) / dt).abs() > GRID_TOL {
+                    n_moved += 1;
+                    if first_moved.is_none_or(|(d, _)| t < d) {
+                        first_moved = Some((t, fires_at));
+                    }
                 }
                 if !keys.contains(&k) {
                     keys.push(k);
                 }
+            }
+            if let Some((declared, fires_at)) = first_moved {
+                notes.push(SnapNote {
+                    effect: name.clone(),
+                    declared,
+                    fires_at,
+                    cause: SnapCause::OffGrid { t_start, dt, n_moved, n_fires },
+                });
             }
             for k in keys {
                 by_step.entry(k).or_default().push(iv_idx);
@@ -331,7 +389,7 @@ impl EffectPlan {
         &self.batches[effect_idx]
     }
 
-    /// Effects the shortened-last-step rule placed, in declaration order.
+    /// Effects fired away from their declared time, in declaration order.
     pub fn notes(&self) -> &[SnapNote] {
         &self.notes
     }
@@ -569,7 +627,8 @@ mod tests {
 
     /// §6.5, `t_end` off the grid (`t_end = 2.5`, `dt = 1`): an effect at 2.45
     /// fires at 2.5 and is noted; one at 2.25 (equidistant) fires at 2.5 and is
-    /// noted; one at 2.2 fires at 2.0 with no note.
+    /// noted; one at 2.2 fires at 2.0, the nearest step end, and is noted as
+    /// off the grid.
     #[test]
     fn shortened_last_step_snaps_to_the_nearer_end() {
         let m = model(&[
@@ -581,13 +640,20 @@ mod tests {
         assert_eq!(p.times(), &[2.0, 2.5]);
         assert_eq!(p.batch(0), &[2], "2.2 fires at 2.0");
         assert_eq!(p.batch(1), &[0, 1], "2.45 and 2.25 fire at t_end = 2.5");
+        let last = SnapCause::ShortenedLastStep { nominal: 2.0 };
         assert_eq!(
             p.notes(),
             &[
-                SnapNote { effect: "late".into(), declared: 2.45, fires_at: 2.5, nominal: 2.0 },
-                SnapNote { effect: "tie".into(), declared: 2.25, fires_at: 2.5, nominal: 2.0 },
+                SnapNote { effect: "late".into(), declared: 2.45, fires_at: 2.5, cause: last.clone() },
+                SnapNote { effect: "tie".into(), declared: 2.25, fires_at: 2.5, cause: last },
+                SnapNote {
+                    effect: "early".into(),
+                    declared: 2.2,
+                    fires_at: 2.0,
+                    cause: SnapCause::OffGrid { t_start: 0.0, dt: 1.0, n_moved: 1, n_fires: 1 },
+                },
             ],
-            "the rule, not the nominal key, placed 2.45 and 2.25 — and only those",
+            "the rule, not the nominal key, placed 2.45 and 2.25; 2.2 is off the grid",
         );
         // A tie within GRID_TOL·dt still goes to t_end (2.25 − 1e-10 is 2e-10
         // nearer 2 than 2.5 in exact arithmetic).
@@ -691,6 +757,79 @@ mod tests {
         assert_eq!(n_substeps(0.0, 2.5, 1.0), 3);
         assert_eq!(n_substeps(0.0, 0.3, 0.1), 3, "float-rounded whole number of steps");
         assert_eq!(n_substeps(1.0, 1.0, 1.0), 0);
+    }
+
+    /// An effect declared off the grid fires at the nearest step end, and the
+    /// plan carries one note saying so; an effect on the grid carries none.
+    #[test]
+    fn an_off_grid_effect_is_noted_and_an_on_grid_one_is_not() {
+        let m = model(&[("pulse", at(&[2.5]), false), ("cull", at(&[4.0]), false)]);
+        let p = grid(&m, 0.0, 10.0, 1.0);
+        assert_eq!(p.times(), &[3.0, 4.0]);
+        assert_eq!(p.notes().len(), 1, "{:?}", p.notes());
+        let note = &p.notes()[0];
+        assert_eq!((note.effect.as_str(), note.declared, note.fires_at), ("pulse", 2.5, 3.0));
+        let text = note.to_string();
+        assert!(
+            text.contains("`pulse`") && text.contains("2.5") && text.contains("t = 3")
+                && text.contains("dt = 1") && text.contains("grid"),
+            "{text}"
+        );
+        let run_note = crate::run_notes::RunNote::EffectSnapped(note.clone());
+        assert_eq!(run_note.code(), "effect-snapped-to-grid");
+
+        let on = model(&[("cull", at(&[4.0]), false), ("ev", at(&[0.1 * 3.0]), true)]);
+        assert!(grid(&on, 0.0, 10.0, 0.1).notes().is_empty(), "float-rounded on-grid times are on the grid");
+        assert!(grid(&on, 0.0, 10.0, 1.0).notes().len() == 1, "0.3 is off the dt = 1 grid");
+    }
+
+    /// A recurring schedule is one note naming its first snapped time and how
+    /// many of its fires were moved, not one note per fire.
+    #[test]
+    fn a_recurring_off_grid_schedule_is_one_note() {
+        let m = model(&[(
+            "every25",
+            InterventionSchedule::Recurring(RecurringSchedule { start: 0.0, period: 2.5, end: 10.0, at_day: None }),
+            true,
+        )]);
+        let p = grid(&m, 0.0, 10.0, 1.0);
+        assert_eq!(p.notes().len(), 1, "{:?}", p.notes());
+        let note = &p.notes()[0];
+        assert_eq!((note.declared, note.fires_at), (2.5, 3.0));
+        let text = note.to_string();
+        assert!(text.contains("2 of its 5 fire times"), "{text}");
+    }
+
+    /// A parameter-dependent fire time is noted, and the notes of plans built at
+    /// different parameter values, as a filter or a sampler builds them, are one
+    /// note to the run's record, so it is said once.
+    #[test]
+    fn a_parametric_off_grid_time_is_said_once() {
+        let mut m = model(&[]);
+        let mut ir_model = (*m.model).clone();
+        ir_model.interventions = vec![Intervention {
+            name: "a_parametric_off_grid_time_is_said_once".into(),
+            base_name: None,
+            fire: FireSource::Scheduled(InterventionSchedule::AtTimesExpr(vec![Expr::param("p")])),
+            actions: vec![Action::Add(AddAction {
+                compartment: "A".into(),
+                count: Expr::const_(1.0),
+                count_grad: Default::default(),
+            })],
+            kind: InterventionKind::Event,
+        }];
+        m = CompiledModel::new(ir_model).unwrap();
+        let mut notes = Vec::new();
+        for p in [2.5, 3.5, 4.25, 6.0] {
+            let plan = EffectPlan::build(&m, &[p], 0.0, 10.0, FireClock::Grid { dt: 1.0 }, Origin::Init).unwrap();
+            assert_eq!(plan.notes().len(), usize::from(p != 6.0), "p = {p}");
+            notes.extend(plan.notes().iter().cloned().map(crate::run_notes::RunNote::EffectSnapped));
+        }
+        assert_eq!(notes.len(), 3);
+        assert!(
+            notes.windows(2).all(|w| crate::run_notes::same_note(&w[0], &w[1])),
+            "one effect at one dt is one note whatever its declared time: {notes:?}"
+        );
     }
 
     #[test]

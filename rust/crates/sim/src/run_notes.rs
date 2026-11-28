@@ -24,13 +24,14 @@
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
-use crate::effect_plan::SnapNote;
+use crate::effect_plan::{SnapCause, SnapNote};
 use crate::inference::linalg::NotPositiveDefinite;
 
 /// One thing to tell the user.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RunNote {
-    /// An effect's firing step was chosen by the shortened-last-step rule.
+    /// A Grid run fires an effect away from its declared time: off the grid,
+    /// or inside a shortened last step ([`crate::effect_plan::SnapCause`]).
     EffectSnapped(SnapNote),
     /// A `normal(...)` observation likelihood scored a datum that is not an
     /// integer; the likelihood is a discretized count distribution and rounds
@@ -57,7 +58,10 @@ impl RunNote {
     /// A stable kebab-case name for the condition, for a notice's code.
     pub fn code(&self) -> &'static str {
         match self {
-            RunNote::EffectSnapped(_) => "effect-snapped-to-run-end",
+            RunNote::EffectSnapped(n) => match n.cause {
+                SnapCause::OffGrid { .. } => "effect-snapped-to-grid",
+                SnapCause::ShortenedLastStep { .. } => "effect-snapped-to-run-end",
+            },
             RunNote::NonIntegerNormalObservation { .. } => "non-integer-normal-observation",
             RunNote::NotPositiveDefinite(_) => "not-positive-definite",
             RunNote::GammaIndexMismatch { .. } => "gamma-index-mismatch",
@@ -69,6 +73,13 @@ impl RunNote {
     /// What makes two notes the same note, so it is said once.
     fn key(&self) -> String {
         match self {
+            // One off-grid note per effect and grid: a fire time that depends
+            // on a parameter is declared afresh at each parameter value a
+            // filter or sampler evaluates, and is still one effect moved by one
+            // rule.
+            RunNote::EffectSnapped(SnapNote { effect, cause: SnapCause::OffGrid { t_start, dt, .. }, .. }) => {
+                format!("{effect}\u{0}{}\u{0}{}", t_start.to_bits(), dt.to_bits())
+            }
             RunNote::EffectSnapped(n) => {
                 format!("{}\u{0}{}\u{0}{}", n.effect, n.declared.to_bits(), n.fires_at.to_bits())
             }
@@ -155,6 +166,12 @@ pub fn record(note: RunNote) {
             }
         }
     }
+}
+
+/// Whether recording `a` and then `b` says only `a`: the two are one note.
+#[cfg(test)]
+pub(crate) fn same_note(a: &RunNote, b: &RunNote) -> bool {
+    a.code() == b.code() && a.key() == b.key()
 }
 
 /// The notes recorded with no reporter installed, oldest first, emptying the

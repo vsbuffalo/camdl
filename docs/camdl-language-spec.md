@@ -4389,7 +4389,10 @@ on the same backend apply the same effects.
   inference method that steps it). An effect fires at the end of a step of the
   run's grid `t_start + k·dt`, with `k = ⌊(t − t_start)/dt + ½⌋`: the nearest
   step, a tie going to the later one. `at [2.4]` at `dt = 1` from `t_start = 0`
-  fires at 2; from `t_start = 0.5`, an effect at 1 fires at 1.5. When `t_end` is
+  fires at 2; from `t_start = 0.5`, an effect at 1 fires at 1.5. An effect
+  with a declared time off the grid is named in one warning per run, giving its
+  earliest such time, the step end it fires at, and how many of its times lie
+  off the grid. When `t_end` is
   off the grid the last step is shortened to end at `t_end`, and an effect
   inside that step fires at the nearer of its two ends, a tie going to `t_end`,
   with a warning naming the effect, its time and the end it fires at. One

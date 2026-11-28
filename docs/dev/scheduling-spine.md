@@ -86,7 +86,10 @@ backend's natural time:
   every inference path that runs chain-binomial steps). An effect fires at the
   end of step `k = ⌊(t − t_start)/dt + ½ + GRID_TOL⌋` of the run's own grid
   (`effect_plan::fire_step`); in a shortened last step, at the nearer of its two
-  ends (ties to `t_end`), with a warning. One intervention fires once per step.
+  ends (ties to `t_end`), with a warning. An effect with declared times off the
+  grid gets one warning (`RunNote::EffectSnapped`, `SnapCause::OffGrid`) per
+  effect and grid, however many plans a filter or sampler builds. One
+  intervention fires once per step.
 - `FireClock::Exact` — continuous-time dynamics (ODE, Gillespie). An effect
   fires at its declared instant; fires within `EFFECT_EPS` are one instant.
 
