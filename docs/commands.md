@@ -545,12 +545,18 @@ computes the prediction again with the outcomes bound and checks that it writes
 the stored prediction's files byte for byte before storing anything, so a score
 costs about what its prediction cost.
 
-The score is stored inside the prediction, at `scores/score-<12 hex>/`:
-`scored.tsv` (one row per scored row or target), `summary.tsv` (one row per
-stream, mode, role and lead; a `joint` stream holds the log score of every
-stream observed at one time) and `score.json`. A one-step score continues the
-filter through the held-out rows, predicting each from the rows before it. The
-files and the rules are in the run specification, §2.2.4.
+The score is stored inside the prediction, at `scores/score-<12 hex>/`. A
+free-forward or one-step score writes `scored_rows.tsv` (one row per scored data
+row, with its `mode` and, for a one-step row, `assimilated_through`, the end of
+the newest row the filter had assimilated before predicting it),
+`summary_rows.tsv` (one row per stream, mode and role), `joint_rows.tsv` (the
+log score of every stream's row ending at one time, scored together) and
+`joint_summary_rows.tsv`. A forecast score writes `scored_targets.tsv` (one row
+per target, with its `origin`, `periods_ahead` and `lead`),
+`summary_targets.tsv` (one row per stream, role and lead), `joint_targets.tsv`
+and `joint_summary_targets.tsv`. Both write `score.json`. A one-step score
+continues the filter through the held-out rows, predicting each from the rows
+before it. The files and the rules are in the run specification, §2.2.4.
 
 ### Sweeps and scenario grids: `simulate --sweep`
 

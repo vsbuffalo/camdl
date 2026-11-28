@@ -424,6 +424,8 @@ cost.
 
 ### Output
 
+The score's layout is amended by `2026-11-27-score-layouts.md`.
+
 A score is stored inside the prediction it scores (run-store proposal,
 "Scores"), and holds:
 
@@ -558,6 +560,9 @@ The vocabulary follows the design values a forecast already states
 
 ## Types
 
+The per-row `lead` and the score's rows are amended by
+`2026-11-27-score-layouts.md`.
+
 The score's identity is the one the run-store proposal defines, with its fields
 filled in:
 
@@ -609,6 +614,8 @@ The existing labels in the `score` crate are kept and extended:
 | covariates       | `CovariateStatement` per forcing | new, in the prediction's identity                                                                                                                                                             |
 
 ## `compare` reads stored scores
+
+The score files `compare` reads are amended by `2026-11-27-score-layouts.md`.
 
 `compare` keeps its command line and its table, and changes where its numbers
 come from. Today it runs `camdl pfilter` child processes for each fit, scores

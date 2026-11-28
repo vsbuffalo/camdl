@@ -1601,41 +1601,101 @@ When a row has one sample (a free-forward prediction at a fixed point with
 `--n-draws 1`), its CRPS, WIS, PIT and coverage come from that single sample,
 and `score.json`'s notes say so.
 
-Under one-step and forecast prediction a row with `stream` `joint` holds the log
-score of every stream observed at one time together, from each sample's summed
-log densities; a forecast also has one `joint` row over every scored target,
-with `lead` empty. Only the log score is computed for a `joint` row.
+Under one-step and forecast prediction a joint row holds the log score of every
+stream observed at one time together, from each sample's summed log densities; a
+forecast also has one joint row over every scored target, with `lead` empty.
+Only the log score is computed for a joint row.
 
 **Files.** The score is stored inside the prediction, at
-`scores/score-<12 hex>/`:
+`scores/score-<12 hex>/`. A score holds one of two layouts, chosen by the
+prediction's mode: data-row files for a free-forward or one-step prediction,
+which predicts the data's own rows, and target files for a forecast, which
+predicts the periods after its origin. Both write `score.json`. The per-stream
+files of both layouts begin with the same columns:
 
-- `scored.tsv`: one row per scored row or target, with the columns
-  `scenario [sweep:<p>] stream source <dims> t_start t_stop [date_start date_stop] mode origin periods_ahead lead role parameters quantity mean q05 q25 q50 q75 q95 observed log_score crps wis wis_dispersion wis_over wis_under pit in_50 in_90`.
-  `stream` is the observation block, and `source` the data source it reads: two
-  blocks reading one source (`weekly from surv`, `recovered from surv`) are two
-  streams. `role` is `trained`, `held_out`, `future` (every forecast target) or
-  `unknown` (a fixed point with no `--holdout-after`). `lead` is a forecast
-  target's time from the origin, or a one-step row's period (for an instant row,
-  the time since its stream's previous row); it is empty for free-forward rows.
-- `summary.tsv`: one row per (scenario, sweep point, stream, stratum, mode,
-  role, lead), with
-  `n n_unscored log_score_sum log_score_mean crps_mean
-  wis_mean coverage_50 coverage_90`.
-  Rows of different streams, modes, roles or leads are never pooled.
-- `score.json`: the prediction's run id; `parameters` (`posterior`; `winner`, an
-  optimizer run's winning point, whose conditioning is verified from the run's
-  training rows; or `fixed_point`, a point given by a file); `conditioning`,
-  what the parameters were fitted to (`hold_out_tail`, from the end of the fit's
-  last training row, for a fit with held-out rows or a score of outcome rows
-  past the fit's data; `in_sample` otherwise; `hold_out_declared` for a fixed
-  point's `--holdout-after`, `unknown` without one); per mode the provenance,
-  the basis (`filtered`, `ode_free_forward`, `simulated_free_forward`) and the
-  draws and samples per draw; the reach, the particle count and the seed; the
-  rules' settings; the forecast's covariate statements; `labels`
+```
+scenario [sweep:<p> ...] stream source <dims> t_start t_stop [date_start date_stop]
+role parameters quantity mean q05 q25 q50 q75 q95 observed
+log_score crps wis wis_dispersion wis_over wis_under pit in_50 in_90
+```
+
+`stream` is the observation block, and `source` the data source it reads: two
+blocks reading one source (`weekly from surv`, `recovered from surv`) are two
+streams. `role` is `trained`, `held_out`, `future` (every forecast target) or
+`unknown` (a fixed point with no `--holdout-after`).
+
+The data-row files:
+
+- `scored_rows.tsv`: one row per scored data row, the shared columns, then
+  `mode assimilated_through [date_assimilated_through]`. `mode` is
+  `free_forward` or `one_step`.
+- `summary_rows.tsv`: one row per (scenario, sweep point, stream, stratum, mode,
+  role), with
+  `n n_unscored log_score_sum log_score_mean crps_mean wis_mean coverage_50 coverage_90`.
+- `joint_rows.tsv`: one row per stop of a one-step prediction, the log score of
+  every stream's row ending there, scored together, with the columns
+  `scenario [sweep:<p> ...] t_start t_stop [date_start date_stop] role streams assimilated_through [date_assimilated_through] log_score`.
+  `streams` lists the streams scored, comma-separated. A free-forward score
+  writes no joint row.
+- `joint_summary_rows.tsv`: one row per (scenario, sweep point, role), with
+  `n n_unscored log_score_sum log_score_mean`. Over the held-out rows,
+  `log_score_sum` is the one-step score of every stream together, log p(held-out
+  rows | training rows).
+
+`assimilated_through` on a one-step row is the end of the latest row, of any
+stream, that the filter had assimilated before it predicted this row. At each
+time where some row ends, the filter predicts every row that ends there before
+it assimilates those with a value, so `assimilated_through` is the latest end
+among the rows with a value at earlier stops. An `NA` row is not assimilated and
+does not count; a held-out row is assimilated after it is scored, so it counts
+for the rows after it. It is empty on a row predicted before any row was
+assimilated, and on every free-forward row, which is conditioned on no row. It
+is written in model time, and also as a date when the model is dated. With a
+daily and a weekly stream, the weekly row ending 15 February has
+`assimilated_through` 14 February, the end of the daily row before it; with the
+weekly stream alone it has 8 February. `t_stop − assimilated_through` is how far
+ahead the row was predicted.
+
+The target files:
+
+- `scored_targets.tsv`: one row per scored target, the shared columns, then
+  `origin periods_ahead lead`: the forecast origin, how many of its stream's
+  periods ahead of the origin the target is, from 1, and the time from the
+  origin to the target's end.
+- `summary_targets.tsv`: one row per (scenario, sweep point, stream, stratum,
+  role, lead), with the score columns of `summary_rows.tsv`.
+- `joint_targets.tsv`: one row per target end time, the log score of every
+  stream's target ending then, scored together, and one row with `lead` empty
+  for every target of the forecast together, with the columns
+  `scenario [sweep:<p> ...] t_start t_stop [date_start date_stop] role streams origin lead log_score`.
+- `joint_summary_targets.tsv`: one row per (scenario, sweep point, role, lead),
+  with `n n_unscored log_score_sum log_score_mean`.
+
+Rows of different streams, modes, roles or leads are never pooled. Each row of
+`scored_rows.tsv` and `scored_targets.tsv` is one stream's row. In one-step mode
+with several streams each row of a stream is predicted from every stream's
+earlier rows, so a stream's `log_score_sum` in `summary_rows.tsv` measures that
+stream given all the data before each of its rows, and the per-stream sums do
+not add to the score of every held-out row together: rows ending at one time are
+scored separately although they share one predicted state. That total is
+`joint_summary_rows.tsv`'s `log_score_sum`. In forecast mode each target is
+predicted from the training rows alone.
+
+- `score.json` (schema tag `camdl.score/v2`): the prediction's run id;
+  `parameters` (`posterior`; `winner`, an optimizer run's winning point, whose
+  conditioning is verified from the run's training rows; or `fixed_point`, a
+  point given by a file); `conditioning`, what the parameters were fitted to
+  (`hold_out_tail`, from the end of the fit's last training row, for a fit with
+  held-out rows or a score of outcome rows past the fit's data; `in_sample`
+  otherwise; `hold_out_declared` for a fixed point's `--holdout-after`,
+  `unknown` without one); per mode the provenance, the basis (`filtered`,
+  `ode_free_forward`, `simulated_free_forward`) and the draws and samples per
+  draw; the reach, the particle count and the seed; the rules' settings; the
+  forecast's covariate statements; `labels`
   (`conditional on covariates observed after the origin` under
   `--covariate NAME=realised`, `held out as declared, not verified` for a fixed
   point's held-out rows); per stream and mode the rows scored and their digest;
-  the sets of streams the `joint` rows are of; the notes; and `forcings_held`,
+  the sets of streams the joint rows are of; the notes; and `forcings_held`,
   each forcing the computation held outside its range under
   `--allow-forcing-extrapolation`, which `score` also prints on stderr.
 
@@ -1643,7 +1703,7 @@ The identity of a score is the prediction, each stream's outcome lines after the
 prediction's conditioning rows (stored as a data table), and the interval levels
 and PIT seed. Editing a held-out outcome makes another score of the same
 prediction. `camdl show` and `camdl cat` read a score; `cat` prints its
-`summary.tsv` by default.
+`summary_rows.tsv` or `summary_targets.tsv` by default.
 
 References: Bracher, Ray, Gneiting & Reich (2021), _PLOS Comput. Biol._ 17(2),
 e1008618; Ferro (2014), _Q. J. R. Meteorol. Soc._ 140(683), 1917–1923; King,
@@ -3764,10 +3824,10 @@ is printed. Each file is read and checked as `cat` reads one.
 
 `cat` given no name prints the result's summary file: a cell's `traj.tsv`, a
 filter run's `loglik.toml`, a fit run's `fit_state.toml`, a fit problem's
-`problem.toml`, a prediction's `report.json`, a score's `summary.tsv`, a profile
-point's `mle.toml`, and the one result file of any other kind. `--chains IDS`
-and `--exclude-chains IDS` keep the rows of the named chains of a fit run's
-`draws`, and are refused for any other file.
+`problem.toml`, a prediction's `report.json`, a score's `summary_rows.tsv` or
+`summary_targets.tsv`, a profile point's `mle.toml`, and the one result file of
+any other kind. `--chains IDS` and `--exclude-chains IDS` keep the rows of the
+named chains of a fit run's `draws`, and are refused for any other file.
 
 Both commands exit 0 when every name resolved and 1 on a refusal: a handle that
 names nothing (`no run matches 'X' in the run store <root>`), a manifest's
@@ -9052,29 +9112,29 @@ The rows compared are a score's rows of the chosen mode, of one role: with
 for a fixed point with no `--holdout-after`, and `trained` for the rest. A
 forecast's rows are `future`, and each lead is its own table, in lead order; a
 fit run's forecast's origin is the end of its training rows. Each row end is one
-scored step: its log score is the score's `joint` row there, or the one stream's
-own when one stream is scored there. A free-forward score holds no joint row, so
-a joint table of a free-forward score of several streams observed at one time is
-refused, naming `--streams`. Every number is the score's: no predictive sample
-is read and no rule is recomputed. Every input is predicted `--replicates` times
-(default 5), at the seeds `seed`, `seed+1`, …: a fit run from `--seed`, a stored
-prediction or score from its prediction's seed, posed again with its other
-options. Each prediction is stored and scored against the outcome rows of the
-first score; each step's log score, and each stream's, is the log-mean-exp of
-the replicates', the replicate totals give the row's filter-noise SE, and the
-CRPS, WIS, PIT and coverage are the first replicate's. An ODE free-forward score
-does not depend on the seed: it is predicted once, its `replicates` is 1 and it
-has no SE. Under `--replicates 1` no filter-noise SE is measured: an evidence
-cell of two filtered rows outside the se(Δ) band then ends
-`filter noise not measured`, and the JSON row's `filter_noise_measured` is
-`false`. `--draws 1` is one posterior draw, still provenance `posterior`. A
-plug-in score at the posterior mean, or any one point, is a fixed point's: write
-the point to a params file (for an optimizer run `fit summary --params-only`
-prints its winner; it prints no point for a sampler run), predict it with
-`camdl predict MODEL --params`, score it, and compare the score. Each note of a
-score (a stream not scored, a row with no observed value) is printed on stderr,
-prefixed by its row, and each forcing its computation held is a line under the
-table on its row.
+scored step: its log score is the score's joint row there (`joint_rows.tsv` or
+`joint_targets.tsv`), or the one stream's own when one stream is scored there. A
+free-forward score holds no joint row, so a joint table of a free-forward score
+of several streams observed at one time is refused, naming `--streams`. Every
+number is the score's: no predictive sample is read and no rule is recomputed.
+Every input is predicted `--replicates` times (default 5), at the seeds `seed`,
+`seed+1`, …: a fit run from `--seed`, a stored prediction or score from its
+prediction's seed, posed again with its other options. Each prediction is stored
+and scored against the outcome rows of the first score; each step's log score,
+and each stream's, is the log-mean-exp of the replicates', the replicate totals
+give the row's filter-noise SE, and the CRPS, WIS, PIT and coverage are the
+first replicate's. An ODE free-forward score does not depend on the seed: it is
+predicted once, its `replicates` is 1 and it has no SE. Under `--replicates 1`
+no filter-noise SE is measured: an evidence cell of two filtered rows outside
+the se(Δ) band then ends `filter noise not measured`, and the JSON row's
+`filter_noise_measured` is `false`. `--draws 1` is one posterior draw, still
+provenance `posterior`. A plug-in score at the posterior mean, or any one point,
+is a fixed point's: write the point to a params file (for an optimizer run
+`fit summary --params-only` prints its winner; it prints no point for a sampler
+run), predict it with `camdl predict MODEL --params`, score it, and compare the
+score. Each note of a score (a stream not scored, a row with no observed value)
+is printed on stderr, prefixed by its row, and each forcing its computation held
+is a line under the table on its row.
 
 Two scores are differenced only when they agree on what they are of. A table
 whose rows differ in any of these is refused (exit 2), the refusal naming the

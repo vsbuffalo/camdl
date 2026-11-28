@@ -1048,9 +1048,15 @@ score's notes.
 ### 4.4 Which rows a held-out score counts
 
 Every scored row carries its `role` (§1.4), read from the row's position against
-its stream's training prefix. A forecast target's role is `future`. The summary
-table never pools rows of different roles, modes, streams or leads, so a
-held-out mean score is a mean over `held_out` rows of one stream in one mode.
+its stream's training prefix. A forecast target's role is `future`. A score of a
+forecast is written in its own files (`scored_targets.tsv` and
+`summary_targets.tsv`), apart from a score of free-forward or one-step rows
+(`scored_rows.tsv` and `summary_rows.tsv`). Neither summary pools rows of
+different roles or streams; the data-row summary keeps the two modes apart and
+the target summary keeps leads apart, so a held-out mean score is a mean over
+`held_out` rows of one stream in one mode, or at one lead. A one-step row has no
+lead: it records `assimilated_through`, the end of the newest row the filter had
+assimilated before predicting it.
 
 The score as a whole carries a `conditioning` label
 ([`Conditioning`](rust:score::trace::Conditioning)), which says what the
