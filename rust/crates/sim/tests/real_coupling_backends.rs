@@ -1,6 +1,6 @@
-//! T4 — evolving real-reservoir coupling on chain_binomial and gillespie (the
-//! stochastic backends with behavioral oracle coverage for the RK4-real path),
-//! with ODE as the deterministic reference.
+//! T4 — evolving real-reservoir coupling on chain_binomial, with ODE as the
+//! deterministic reference. The Gillespie backend refuses the model: its
+//! infection rate reads the real compartment W, which changes between events.
 //!
 //! Model: `cholera_siwr` golden IR. W is a REAL compartment integrated by
 //! `dW/dt = xi·I − omega_W·W`, and W feeds back into the infection rate via the
@@ -66,7 +66,6 @@ fn assert_real_coupling_evolved(backend: &str, cfg: SimConfig) {
     assert_eq!(t_end, 365.0, "fixture t_end drifted; thresholds assume 365");
 
     let sim: &dyn Simulate = match backend {
-        "gillespie" => &GillespieSim,
         "chain_binomial" => &ChainBinomialSim,
         other => panic!("unexpected backend {other}"),
     };
@@ -103,11 +102,18 @@ fn chain_binomial_evolves_real_reservoir_and_couples() {
     );
 }
 
+/// The Gillespie engine itself refuses a rate that reads a real compartment,
+/// so a caller that skips command-line dispatch cannot run it either.
 #[test]
-fn gillespie_evolves_real_reservoir_and_couples() {
-    assert_real_coupling_evolved(
-        "gillespie",
-        SimConfig::Gillespie(GillespieConfig { t_start: 0.0, t_end: 365.0, output_dt: None }),
+fn gillespie_refuses_a_rate_reading_the_real_reservoir() {
+    let compiled = Arc::new(load());
+    let err = GillespieSim
+        .run(&compiled, &compiled.default_params, SEED,
+             &SimConfig::Gillespie(GillespieConfig { t_start: 0.0, t_end: 365.0, output_dt: None }))
+        .expect_err("gillespie must refuse a rate that reads a real compartment");
+    assert!(
+        matches!(&err, sim::SimError::Validation(m) if m.contains("real compartment")),
+        "the refusal must name the cause; got {err:?}"
     );
 }
 

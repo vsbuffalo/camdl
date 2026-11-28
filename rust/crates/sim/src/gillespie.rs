@@ -137,6 +137,14 @@ pub fn run_gillespie(
 /// transition and is passed the pre-stoichiometry state, so it cannot reorder
 /// or add draws to the simulation's `StatefulRng`. This is the load-bearing
 /// trajectory-invariance invariant (validation Tier 2a).
+///
+/// A model that requires [`Capabilities::TIME_VARYING_RATES`](crate::Capabilities)
+/// is refused with [`SimError::Validation`]: the waiting time to the next event
+/// is drawn from the propensities at the start of the wait, and every
+/// propensity is recomputed only when the integer state changes or at a full
+/// recompute, so a rate that changes between events would be held at a stale
+/// value. Command-line dispatch refuses the same models earlier, with a hint
+/// naming the backends that run them.
 pub fn run_gillespie_with_observer(
     model: &CompiledModel,
     params: &[f64],
@@ -148,6 +156,15 @@ pub fn run_gillespie_with_observer(
     // See chain_binomial.rs and tests/progress_tick_invariance.rs.
     mut tick: Option<&mut dyn FnMut(f64)>,
 ) -> Result<Trajectory, SimError> {
+    if model.required_capabilities().contains(crate::Capabilities::TIME_VARYING_RATES) {
+        return Err(SimError::Validation(
+            "the Gillespie backend cannot run this model: a transition rate reads `t`, a \
+             forcing or a real compartment, so it changes between events, and the \
+             waiting-time draw is exact only for rates constant between events. Use the \
+             chain-binomial or ODE backend."
+                .to_string(),
+        ));
+    }
     // Paired-seed coupling: running baseline and intervention with the same
     // seed produces identical trajectories up to the first state divergence,
     // because the stateful PRNG's output only depends on its prior consumption
@@ -414,19 +431,14 @@ pub fn run_gillespie_with_observer(
                 )?;
             }
 
+            // An effect changed the integer state, so every propensity is
+            // recomputed. At an output time alone nothing changed: no rate reads
+            // `t` (refused above), so the propensities stand, and only the
+            // running total's floating-point drift below zero is clamped.
             if stop.has(StopReason::ScheduledEffect) {
-                // Full recompute after intervention (integer state changed).
                 eval_feasible_propensities(model, &int_s, &real_s, params, t, model.model.simulation.dt.unwrap_or(1.0), per_eval, &mut propensities)?;
                 lambda_total = propensities.iter().sum();
             } else {
-                // Time advanced but no state change: re-evaluate time-dependent transitions.
-                let ctx = EvalCtx { model, int_s: &int_s, real_s: &real_s, params, t, dt: model.model.simulation.dt.unwrap_or(1.0), projected: None, aux: None, int_float_override: None, per_eval };
-                for &tr_idx in &model.time_dep_transitions {
-                    let old = propensities[tr_idx];
-                    let new_p = eval_one(tr_idx, &ctx)?;
-                    propensities[tr_idx] = new_p;
-                    lambda_total += new_p - old;
-                }
                 lambda_total = lambda_total.max(0.0);
             }
 
@@ -553,20 +565,10 @@ pub fn run_gillespie_with_observer(
                 }
             }
 
-            // Time-dependent transitions at new t (skip if already updated above)
-            for &tr_idx in &model.time_dep_transitions {
-                if !updated.contains(&tr_idx) {
-                    let old = propensities[tr_idx];
-                    let new_p = eval_one(tr_idx, &ctx)?;
-                    propensities[tr_idx] = new_p;
-                    lambda_total += new_p - old;
-                }
-            }
-
             // Transitions that consume a compartment the firing changed: their
             // feasibility can change even when their rate does not read that
-            // compartment (a constant-rate exit). Run after the two passes above
-            // so their summation order is untouched; a transition already
+            // compartment (a constant-rate exit). Run after the pass above so
+            // its summation order is untouched; a transition already
             // current re-evaluates to the same value and adds exactly 0.
             for &(local, _) in &model.transition_stoich[fired_idx] {
                 for &tr_idx in &model.comp_to_consumers[local] {

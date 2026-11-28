@@ -20,9 +20,9 @@
 use std::path::PathBuf;
 use sim::{
     compiled_model::CompiledModel,
-    config::{ChainBinomialConfig, GillespieConfig, OdeConfig, SimConfig},
+    config::{ChainBinomialConfig, OdeConfig, SimConfig},
     simulate::Simulate,
-    ChainBinomialSim, GillespieSim, OdeSim,
+    ChainBinomialSim, OdeSim,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -116,13 +116,13 @@ fn chain_binomial_rate_couples_to_real_compartment() {
 }
 
 /// Cross-backend check (approach b): with W held at a constant nonzero value,
-/// the per-capita infection rate is constant (W/(W+kappa) is fixed), so all
-/// three backends model the same constant-hazard S→I process. They should
-/// agree on the *direction and rough magnitude* of depletion. The buggy
-/// chain-binomial is the outlier: it fires zero infections while ODE and
-/// Gillespie deplete S substantially.
+/// the per-capita infection rate is constant (W/(W+kappa) is fixed), so
+/// chain-binomial and ODE model the same constant-hazard S→I process. They
+/// should agree on the *direction and rough magnitude* of depletion. The buggy
+/// chain-binomial is the outlier: it fires zero infections while ODE depletes
+/// S substantially. (Gillespie refuses the model, because its rate reads W.)
 #[test]
-fn chain_binomial_agrees_with_ode_and_gillespie_on_real_coupling() {
+fn chain_binomial_agrees_with_ode_on_real_coupling() {
     let mut model = load_fixture("real_coupled_rate");
     set_w_init(&mut model, "W", 1.0e6); // saturation term ~1, rate ~beta*S
     let compiled = CompiledModel::new(model.clone()).unwrap();
@@ -142,17 +142,6 @@ fn chain_binomial_agrees_with_ode_and_gillespie_on_real_coupling() {
         .unwrap();
     let ode_s_end = ode.snapshots.last().unwrap().int_state.counts[0];
 
-    // Gillespie: exact stochastic. Also depletes S nearly fully.
-    let gil = GillespieSim
-        .run(
-            &compiled,
-            &params,
-            42,
-            &SimConfig::Gillespie(GillespieConfig { t_start, t_end, output_dt: None }),
-        )
-        .unwrap();
-    let gil_s_end = gil.snapshots.last().unwrap().int_state.counts[0];
-
     let cb = ChainBinomialSim
         .run(
             &compiled,
@@ -163,16 +152,15 @@ fn chain_binomial_agrees_with_ode_and_gillespie_on_real_coupling() {
         .unwrap();
     let cb_s_end = cb.snapshots.last().unwrap().int_state.counts[0];
 
-    // ODE and Gillespie both deplete S strongly (S_end well below 100 of 1000).
+    // ODE depletes S strongly (S_end well below 100 of 1000).
     assert!(ode_s_end < 100, "ODE should deplete S (got S_end={ode_s_end})");
-    assert!(gil_s_end < 100, "Gillespie should deplete S (got S_end={gil_s_end})");
 
     // The bug makes chain-binomial the outlier — it leaves S at the full 1000
     // because it reads W==0 (rate 0). A correct backend also depletes S.
     assert!(
         cb_s_end < 100,
         "chain-binomial did NOT deplete S (S_end={cb_s_end}) while ODE \
-         (S_end={ode_s_end}) and Gillespie (S_end={gil_s_end}) did. \
+         (S_end={ode_s_end}) did. \
          chain-binomial ignored the real compartment W coupling in the rate."
     );
 }

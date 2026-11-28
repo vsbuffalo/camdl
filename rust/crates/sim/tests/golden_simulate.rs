@@ -119,19 +119,6 @@ fn test_pure_death_gillespie() {
     }
 }
 
-#[test]
-fn test_cholera_siwr_gillespie() {
-    let model = load_golden("cholera_siwr");
-    let compiled = CompiledModel::new(model.clone()).unwrap();
-    let params = compiled.default_params.clone();
-    let config = SimConfig::Gillespie(GillespieConfig {
-        t_start: model.simulation.t_start,
-        t_end: 30.0, // shorter for test speed
-        output_dt: None,
-    });
-    let traj = GillespieSim.run(&compiled, &params, 42, &config).unwrap();
-    check_trajectory_invariants("cholera_siwr", &traj, false);
-}
 
 #[test]
 fn test_config_mismatch_returns_err() {

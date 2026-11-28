@@ -520,12 +520,10 @@ fn collect_int_comp_deps(
 /// either via a named time function (`TimeFunc`, e.g. a seasonal forcing) or a
 /// bare time reference (`Time`, e.g. `t` in `lambda / (1 + exp(-(t-tau)/w))`).
 ///
-/// This drives `time_dep_transitions`, which Gillespie re-evaluates at every
-/// output/intervention boundary as time advances (the SSA otherwise freezes a
-/// transition's propensity between events). Missing `Expr::Time` here means a
-/// rate that depends on bare `t` is frozen at its `t=0` value under Gillespie,
-/// silently producing wrong dynamics (the chain-binomial backend
-/// re-evaluate every substep regardless, so they are unaffected).
+/// This builds `time_dep_transitions`, one half of the `TIME_VARYING_RATES`
+/// requirement that makes the Gillespie backend refuse the model. A case
+/// missed here would let Gillespie run a rate that changes during its waits
+/// and hold it at a stale value.
 // A memo-free convenience over `expr_is_time_dependent_memo`, used only by the
 // unit tests below (production callers share a memo across a transition scan).
 #[cfg(test)]
@@ -1260,8 +1258,8 @@ pub struct CompiledModel {
     /// option (gh#649).
     deme_map_cache: std::sync::OnceLock<crate::lineage::DemeMap>,
 
-    /// Indices of transitions whose rate expression contains a time function.
-    /// These must be re-evaluated whenever simulation time advances.
+    /// Indices of transitions whose rate reads `t` or a forcing, directly or
+    /// through a binding. A non-empty list raises `TIME_VARYING_RATES`.
     pub time_dep_transitions: Vec<usize>,
 
     /// For chain-binomial multinomial draws: transitions grouped by source

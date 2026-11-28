@@ -211,11 +211,13 @@ fn test_sparse_updates_deterministic() {
     }
 }
 
-/// Non-negativity must hold across all snapshots of the cholera model (which has
-/// a contact matrix and more complex rate expressions).
+/// Non-negativity must hold across all snapshots of a model with a real
+/// compartment (`sir_reservoir`: W follows an ODE that no transition rate
+/// reads, the case Gillespie runs; a rate that reads W is refused).
 #[test]
-fn test_non_negativity_cholera() {
-    let model = load_model(&golden_path("cholera_siwr"));
+fn test_non_negativity_real_reservoir() {
+    let mut model = load_model(&ocaml_golden_path("sir_reservoir"));
+    apply_baseline(&mut model);
     let compiled = CompiledModel::new(model.clone()).unwrap();
     let params = &compiled.default_params.clone();
     let config = SimConfig::Gillespie(GillespieConfig {
