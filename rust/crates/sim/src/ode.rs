@@ -53,7 +53,11 @@ impl Simulate for OdeSim {
         // RUNTIME_DT: the RK4 flow accumulation evaluates a `dt`-referencing
         // rate at the REALIZED substep length (`dt_actual`), see
         // `ode_dt_rate_flow.rs`. gh#54.
-        crate::Capabilities::REAL_COMPARTMENTS | crate::Capabilities::RUNTIME_DT
+        // TIME_VARYING_RATES: the integrator evaluates every rate at each
+        // stage time.
+        crate::Capabilities::REAL_COMPARTMENTS
+            | crate::Capabilities::RUNTIME_DT
+            | crate::Capabilities::TIME_VARYING_RATES
     }
 
     fn name(&self) -> &'static str { "ode" }

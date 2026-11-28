@@ -316,13 +316,11 @@ from the updated state.
 
 - **Discrete-time (chain-binomial) `[v0.1]`:** real compartments advance by RK4
   integration at each step before the binomial draws.
-- **Gillespie `[v0.1]`:** propensities that depend on real compartments vary
-  continuously between events; treat propensities as locally constant within a
-  short horizon and re-evaluate after each stochastic jump. This approximation
-  is negligible when real state evolves slowly relative to the mean inter-event
-  time (the typical case for environmental reservoirs). Full PDMP exact
-  simulation (thinning / first-passage time) is a correctness improvement
-  deferred to v0.2.
+- **Gillespie:** real compartments advance by RK4 between events. A model in
+  which a transition rate reads a real compartment, `t` or a forcing is refused,
+  because such a rate changes during the wait between events and the waiting
+  time is drawn from the rates at its start. Real compartments that no rate
+  reads are allowed.
 - **ODE backend `[v0.2]`:** all compartments are treated as continuous
   variables; the combined system is a single coupled ODE. No distinction between
   integer and real compartments at runtime. Deferred because pure-ODE models
@@ -2278,7 +2276,7 @@ error). Validated via distributional comparison.
 | `sir_large`             | N=10⁸, overflow/perf                     | Gillespie, ODE            |
 | `sir_vaccination`       | Scheduled intervention                   | All                       |
 | `seir_age`              | Age stratification, contact matrix       | All                       |
-| `seir_seasonal`         | Time-varying rates                       | All                       |
+| `seir_seasonal`         | Time-varying rates                       | Chain-binomial, ODE       |
 | `pure_death`            | Analytic solution available              | Gillespie                 |
 | `birth_death`           | Steady-state analytic                    | Gillespie                 |
 | `two_state`             | Reversible process, analytic equilibrium | Gillespie                 |

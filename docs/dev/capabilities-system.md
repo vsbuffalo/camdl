@@ -58,6 +58,7 @@ is the exception: it is request-driven, not feature-derived — see its row.)
 | `LINEAGES`               | the `#[lineage]` DSL annotation exists, but the requirement is **not derived from it** — raised only on explicit `--lineages`/`--event-log` | gillespie + chain-binomial (not ODE)                               |
 | `RUNTIME_DT`             | a rate **or its `rate_grad`** references `Expr::Dt`                                                                                         | ODE + chain-binomial (not gillespie)                               |
 | `REACTIVE_INTERVENTIONS` | an intervention has a reactive fire source (`fire = Reactive(..)`, gh#204)                                                                  | chain-binomial forward only (not gillespie/ode; not inference yet) |
+| `TIME_VARYING_RATES`     | a rate reads `t`, a forcing or a real compartment, directly or through a binding                                                            | ODE + chain-binomial, simulate and inference (not gillespie)       |
 
 **Derivation (model side).** `CompiledModel::required_capabilities`
 (`compiled_model.rs`) scans the IR and ORs in a flag per feature present. It is
@@ -339,16 +340,15 @@ proposals rewrite.
    by_ the same capability-gate-consolidation proposal, which upgrades the
    simulate message to the shared hint builder.
 
-4. **Gillespie + time-varying rates is a piecewise-constant approximation, not a
-   capability error.** Gillespie's next-event draw holds the total propensity
-   constant over each exponential wait, so a time-varying rate (seasonal
-   forcing, a bare `t`, importation forcing) is frozen within the wait and only
-   refreshed at grid boundaries — biasing the inhomogeneous Poisson process. It
-   is _allowed_ (a fine output grid shrinks the bias), so it is surfaced as a
-   WARNING (`warn_if_gillespie_time_dep`, gh#95) at the gillespie forward
-   dispatch, not a hard gate. Mitigation: use a fine output grid, or prefer
-   `chain_binomial` (re-evaluates the rate every substep). Mirrors
-   `warn_if_ode_euler_flow` (the `dt`-in-rate ODE-Euler caveat).
+4. **Gillespie + time-varying rates is a capability error.** Gillespie's
+   next-event draw holds the total propensity constant over each exponential
+   wait, which is exact only for rates constant between events. A rate reading
+   `t`, a forcing or a real compartment would be held at a stale value until the
+   next event, output time or effect time, so its error would depend on the
+   output schedule. `TIME_VARYING_RATES` makes the combination fail at dispatch.
+   Exact simulation of such rates, by thinning (Lewis and Shedler 1979, _Naval
+   Research Logistics Quarterly_ 26(3):403–413), needs an upper bound on each
+   forcing over the wait, which camdl does not compute.
 
 ## Two traps to internalise
 

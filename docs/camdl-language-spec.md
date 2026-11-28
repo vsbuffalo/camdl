@@ -3577,9 +3577,9 @@ compartments evolve continuously between them.
 - **Gillespie.** The real compartments are advanced by one RK4 step over each
   interval between events, and to each scheduled boundary, and are clamped at 0.
   The waiting time to the next event is drawn from the propensities at the
-  start of the interval, so a rate that reads a real compartment uses the
-  compartment's value at the previous event, and the event times are
-  approximate (§18).
+  start of the interval, which is exact only when no rate changes before the
+  next event, so a model in which a transition rate reads a real compartment
+  is refused on this backend (§18).
 - **ODE.** Every transition also contributes `stoichiometry × rate` to the
   derivatives of its compartments, so integer compartments evolve as
   deterministic flows, and the real compartments follow their equations. The
@@ -5888,10 +5888,10 @@ draws each waiting time from the total rate at the start of the wait, the
 stochastic simulation algorithm of Gillespie (1977,
 [J. Phys. Chem. 81(25)](https://doi.org/10.1021/j100540a008)), whose event
 times are exact when every rate is constant between events. A rate that reads
-`t`, a forcing or a real compartment changes during the wait; Gillespie holds
-it at its value at the last event or at the last output or effect time,
-whichever is later, so its event times are approximate, with an error that
-shrinks as the output grid is refined. A run with such a rate warns.
+`t`, a forcing or a real compartment changes during the wait, so the Gillespie
+backend refuses a model with such a rate and names the chain-binomial and ODE
+backends, which evaluate every rate at each step. A real compartment that no
+rate reads does not cause the refusal.
 `camdl simulate --dt` overrides the model's `dt` for one run, as a convergence
 check or a sensitivity sweep needs; a command that fits or scores data refuses a
 written step that differs from the model's (run spec §1.3.1). With neither set,

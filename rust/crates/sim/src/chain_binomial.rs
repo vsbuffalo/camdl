@@ -281,6 +281,8 @@ impl Simulate for ChainBinomialSim {
             // withholds it (no reactive-aware filter yet), and gillespie/ode
             // forward still reject (PR3).
             | crate::Capabilities::REACTIVE_INTERVENTIONS
+            // Every rate is evaluated at the start of each step.
+            | crate::Capabilities::TIME_VARYING_RATES
     }
 
     fn name(&self) -> &'static str { "chain_binomial" }

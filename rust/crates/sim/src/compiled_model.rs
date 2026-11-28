@@ -592,6 +592,58 @@ fn expr_is_time_dependent_memo(
     }
 }
 
+/// True if `expr` reads a real compartment, one of `real`, directly or through
+/// a binding. A real compartment follows its `ode {}` equation continuously, so
+/// a rate that reads one changes between transition events. `memo` caches the
+/// answer per binding, as in [`expr_is_time_dependent_memo`]. Matched
+/// exhaustively, so a new `Expr` variant must decide here whether it can read a
+/// compartment.
+fn expr_reads_real_compartment_memo(
+    expr: &Expr,
+    real: &std::collections::HashSet<&str>,
+    bindings: &HashMap<&str, &Expr>,
+    memo: &mut HashMap<String, bool>,
+) -> bool {
+    let reads = |e: &Expr, memo: &mut HashMap<String, bool>| {
+        expr_reads_real_compartment_memo(e, real, bindings, memo)
+    };
+    match expr {
+        Expr::Pop(p) => real.contains(p.pop.as_str()),
+        Expr::PopSum(ps) => ps.pop_sum.iter().any(|n| real.contains(n.as_str())),
+        Expr::BinOp(w) => reads(&w.bin_op.left, memo) || reads(&w.bin_op.right, memo),
+        Expr::UnOp(w) => reads(&w.un_op.arg, memo),
+        Expr::Cond(w) => {
+            reads(&w.cond.pred, memo) || reads(&w.cond.then, memo) || reads(&w.cond.else_, memo)
+        }
+        Expr::TableLookup(w) => w.table_lookup.indices.iter().any(|e| reads(e, memo)),
+        Expr::Reduce(w) => w.reduce.iter().any(|e| reads(e, memo)),
+        Expr::UncheckedDim(w) => reads(&w.unchecked_dim.inner, memo),
+        Expr::BindingRef(w) => {
+            let name = w.binding_ref.as_str();
+            if let Some(&v) = memo.get(name) {
+                return v;
+            }
+            let v = bindings.get(name).is_some_and(|body| reads(body, memo));
+            memo.insert(name.to_string(), v);
+            v
+        }
+        // A per-eval body reads only parameters and tables; the rest are leaves
+        // that name no compartment.
+        Expr::Const(_)
+        | Expr::Param(_)
+        | Expr::ConstRef(_)
+        | Expr::Time(_)
+        | Expr::Dt(_)
+        | Expr::TimeFunc(_)
+        | Expr::Projected(_)
+        | Expr::UnitLiteral(_)
+        | Expr::PerEvalRef(_)
+        | Expr::ObsColumnRef(_)
+        | Expr::ObsAnchor(_)
+        | Expr::ForcingBasis(_) => false,
+    }
+}
+
 /// Fix B safety net: true if `expr` directly references an estimated `Param`.
 ///
 /// Shared bindings must be **state-only** (`d(binding)/dp ≡ 0`): `autodiff`
@@ -2838,6 +2890,18 @@ impl CompiledModel {
         if uses_dt {
             caps |= crate::Capabilities::RUNTIME_DT;
         }
+        // A rate that reads `t` or a forcing (`time_dep_transitions`) or a real
+        // compartment changes between transition events.
+        let real: std::collections::HashSet<&str> = self.real_comp_indices.iter()
+            .map(|&g| self.model.compartments[g].name.as_str()).collect();
+        let mut real_memo: HashMap<String, bool> = HashMap::new();
+        let reads_real = !real.is_empty()
+            && self.model.transitions.iter().any(|t| {
+                expr_reads_real_compartment_memo(&t.rate, &real, &binding_bodies, &mut real_memo)
+            });
+        if !self.time_dep_transitions.is_empty() || reads_real {
+            caps |= crate::Capabilities::TIME_VARYING_RATES;
+        }
         // gh#204. A reactive fire source is parsed and represented in the IR
         // but executed by no backend yet — raise the requirement so dispatch
         // rejects it (no backend grants it) rather than silently dropping the
@@ -3743,6 +3807,52 @@ mod tests {
                 "the dispatch gate (!caps.contains(required)) must reject a reactive model on gillespie/ode"
             );
         }
+    }
+
+    /// A rate that reads `t`, a forcing or a real compartment changes between
+    /// transition events, which Gillespie's waiting-time draw cannot represent,
+    /// so such a model requires `TIME_VARYING_RATES`, which chain-binomial and
+    /// ODE grant and Gillespie does not. A real compartment that no rate reads
+    /// raises nothing.
+    #[test]
+    fn time_varying_rates_are_refused_only_by_gillespie() {
+        use crate::Capabilities;
+        use crate::{ChainBinomialSim, GillespieSim, OdeSim, Simulate};
+
+        let requires = |model: ir::Model| {
+            CompiledModel::new(model)
+                .unwrap()
+                .required_capabilities()
+                .contains(Capabilities::TIME_VARYING_RATES)
+        };
+
+        // Controls: rates read only integer compartments and parameters.
+        // `sir_reservoir` has a real compartment `W` that no rate reads.
+        assert!(!requires(load_with_params("sir_basic")), "sir_basic has no time-varying rate");
+        assert!(
+            !requires(load_with_params("sir_reservoir")),
+            "a real compartment that no rate reads must not make a rate time-varying"
+        );
+
+        // A forcing.
+        assert!(
+            requires(load_with_params("seir_vaccine_seasonal")),
+            "a seasonal forcing in a rate must raise TIME_VARYING_RATES"
+        );
+        // Real compartments read through the `Total` binding in the infection rate.
+        assert!(
+            requires(load_with_params("sir_reservoir_mixed")),
+            "a rate reading real compartments through a binding must raise TIME_VARYING_RATES"
+        );
+        // A bare `t` factor.
+        let mut model = load_with_params("sir_basic");
+        let tr = model.transitions.iter_mut().find(|t| t.name == "infection").unwrap();
+        tr.rate = Expr::bin_op(BinOp::Mul, tr.rate.clone(), Expr::time());
+        assert!(requires(model), "a rate with a `t` factor must raise TIME_VARYING_RATES");
+
+        assert!(ChainBinomialSim.capabilities().contains(Capabilities::TIME_VARYING_RATES));
+        assert!(OdeSim.capabilities().contains(Capabilities::TIME_VARYING_RATES));
+        assert!(!GillespieSim.capabilities().contains(Capabilities::TIME_VARYING_RATES));
     }
 
     /// gh#128: a `rate_grad` entry keyed on a parameter that does not exist in

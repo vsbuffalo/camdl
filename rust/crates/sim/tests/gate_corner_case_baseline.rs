@@ -157,7 +157,6 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("dt_rate", "ode", 0xfb342768c44ea834),
     // seasonal_drift runs here at dt=1 (integer), where s*dt == accumulated, so
     // these pin the integer-dt behaviour.
-    ("seasonal_drift", "gillespie", 0x3ebeed379edb8107),
     ("seasonal_drift", "chain_binomial", 0xf8db0999aa8fe812),
     ("seasonal_drift", "ode", 0x631a6bb7eba02031),
     // The effect-plan fixtures (proposal 2026-10-04 §6.2): zero-rate models whose
@@ -185,6 +184,9 @@ fn corner_case_trajectory_baselines_hold() {
     let capture = std::env::var("CAMDL_CAPTURE_BASELINE").is_ok();
     let mut captured: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
+    // Every (model, backend) this gate ran, so a baseline row that no run
+    // checks fails the gate rather than passing unexercised.
+    let mut ran: Vec<(String, String)> = Vec::new();
 
     for name in discover_models() {
         let model = load(&name);
@@ -216,6 +218,7 @@ fn corner_case_trajectory_baselines_hold() {
                 Err(_) => continue, // baseline-time sim errors are not this gate's concern
             };
             let hash = trajectory_hash(&traj);
+            ran.push((name.to_string(), backend.to_string()));
             if capture {
                 captured.push(format!("    (\"{name}\", \"{backend}\", 0x{hash:016x}),"));
                 continue;
@@ -241,5 +244,13 @@ fn corner_case_trajectory_baselines_hold() {
     assert!(
         missing.is_empty(),
         "no baseline for: {missing:?} — run with CAMDL_CAPTURE_BASELINE=1 and paste the table"
+    );
+    let unexercised: Vec<String> = BASELINES.iter()
+        .filter(|(n, b, _)| !ran.iter().any(|(rn, rb)| rn == n && rb == b))
+        .map(|(n, b, _)| format!("{n}/{b}"))
+        .collect();
+    assert!(
+        unexercised.is_empty(),
+        "baseline rows that no run checks: {unexercised:?} — delete them from BASELINES"
     );
 }

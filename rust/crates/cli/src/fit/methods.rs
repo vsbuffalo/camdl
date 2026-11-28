@@ -682,10 +682,19 @@ pub fn check_model_capabilities(
         // (ode_dt_rate_flow.rs) — so a `dt`-in-rate model fits on either. The
         // requirement only excludes gillespie, which is not an inference
         // backend here.
+        // TIME_VARYING_RATES: both inference backends evaluate every rate at
+        // each step.
         InferenceBackend::ChainBinomial => {
-            Capabilities::OVERDISPERSION | Capabilities::BALANCE | Capabilities::RUNTIME_DT
+            Capabilities::OVERDISPERSION
+                | Capabilities::BALANCE
+                | Capabilities::RUNTIME_DT
+                | Capabilities::TIME_VARYING_RATES
         }
-        InferenceBackend::Ode => Capabilities::REAL_COMPARTMENTS | Capabilities::RUNTIME_DT,
+        InferenceBackend::Ode => {
+            Capabilities::REAL_COMPARTMENTS
+                | Capabilities::RUNTIME_DT
+                | Capabilities::TIME_VARYING_RATES
+        }
     };
     // gh#122: a source that mixes a `deterministic(...)` exit with another exit
     // is unsupported on the stochastic (chain_binomial) inference producer — the
@@ -760,36 +769,6 @@ pub fn warn_if_ode_euler_flow(compiled: &sim::CompiledModel) {
     }
 }
 
-/// gh#95: the predicate behind [`warn_if_gillespie_time_dep`] — true iff the
-/// model has at least one transition whose rate is time-varying (a `TimeFunc`
-/// forcing, a bare `t`, or anything that transitively reads one; the same set
-/// Gillespie must re-evaluate as time advances, `time_dep_transitions`).
-/// Factored out so the classification is unit-testable without capturing stderr.
-pub(crate) fn gillespie_time_dep_warn(compiled: &sim::CompiledModel) -> bool {
-    !compiled.time_dep_transitions.is_empty()
-}
-
-/// gh#95: Gillespie's next-event draw holds the total propensity CONSTANT over
-/// each exponential inter-event wait, so a time-varying rate is effectively
-/// frozen within the wait and only refreshed at grid boundaries — a
-/// piecewise-constant approximation to the true inhomogeneous Poisson process
-/// (seasonal forcing, a bare-`t` ramp, importation forcing). A fine output grid
-/// shrinks the bias, so this is surfaced as a WARNING rather than a hard error
-/// (mirrors `warn_if_ode_euler_flow`). Emitted once, at the gillespie forward
-/// dispatch chokepoint. No-op unless the model has a time-varying rate.
-pub fn warn_if_gillespie_time_dep(compiled: &sim::CompiledModel) {
-    if gillespie_time_dep_warn(compiled) {
-        crate::out::detached().say(format_args!("{}", crate::out::paint::stderr().paint(
-            "⚠ model has time-varying transition rate(s): on the \
-             gillespie backend the next-event draw holds the total rate constant \
-             over each exponential wait, so a time-varying rate is treated as \
-             piecewise-constant on the output grid — biasing the inhomogeneous \
-             Poisson process. Mitigations: use a fine output grid (smaller steps \
-             → smaller bias), or prefer backend = \"chain_binomial\", which \
-             re-evaluates the rate every substep. (gh#95)", crate::out::paint::Style::Warn)));
-    }
-}
-
 /// Per-capability hint text for the unsupported-capability error. Keyed on the
 /// `Capabilities` flag; `name` is the bitflags constant name (used as the
 /// non-blank fallback for any flag without bespoke guidance, so the message
@@ -835,6 +814,15 @@ pub(crate) fn capability_hint(name: &str, flag: sim::Capabilities) -> String {
              backend (gh#204) — running it would silently drop the policy. \
              Remove the reactive policy, or replace it with an equivalent fixed \
              schedule (`interventions {}` with `at [...]`) for now.".to_string(),
+        Capabilities::TIME_VARYING_RATES =>
+            "TIME_VARYING_RATES: a transition rate reads `t`, a forcing or a \
+             real compartment, so it changes between events. gillespie draws \
+             each waiting time from the total rate at the start of the wait, \
+             which is exact only when every rate stays constant until the next \
+             event; with a rate that changes during the wait its event times \
+             would be wrong, by an amount that depends on the output times. Use \
+             backend = \"chain_binomial\", which evaluates every rate at each \
+             step of length `dt`, or backend = \"ode\".".to_string(),
         // Any other flag (e.g. LINEAGES) still gets a named, non-blank line.
         _ => format!(
             "{name}: required by the model but not supported by this backend."
@@ -1077,11 +1065,11 @@ mod tests {
         );
     }
 
-    /// gh#95: `gillespie_time_dep_warn` is TRUE for a model with a time-varying
-    /// transition rate (here a bare `t` factor) and FALSE for a time-free model.
-    /// This is the predicate behind the gillespie inhomogeneous-Poisson warning.
+    /// Both inference backends evaluate every rate at each step, so the fit
+    /// path's capability table grants `TIME_VARYING_RATES` to both: a model
+    /// whose rate reads `t` fits on either.
     #[test]
-    fn gillespie_time_dep_warn_detects_time_varying_rate() {
+    fn inference_backends_accept_a_time_varying_rate() {
         use ir::{
             expr::{BinOp, BinOpExpr, BinOpWrap, Expr, ParamExpr, PopExpr, TimeExpr},
             model::{
@@ -1165,15 +1153,17 @@ mod tests {
         // Time-varying: rate = beta * I * t.
         let time_varying = build("tvar", mul(beta_i(), Expr::Time(TimeExpr { time: () })));
         assert!(
-            gillespie_time_dep_warn(&time_varying),
-            "a rate with a bare `t` factor must be flagged time-varying (gh#95)"
+            time_varying
+                .required_capabilities()
+                .contains(sim::Capabilities::TIME_VARYING_RATES),
+            "a rate with a bare `t` factor requires TIME_VARYING_RATES"
         );
-        // Time-free control: rate = beta * I.
-        let time_free = build("tfree", beta_i());
-        assert!(
-            !gillespie_time_dep_warn(&time_free),
-            "a time-free rate must NOT be flagged"
-        );
+        for backend in [InferenceBackend::ChainBinomial, InferenceBackend::Ode] {
+            assert!(
+                check_model_capabilities(backend, &time_varying).is_ok(),
+                "{backend} inference evaluates rates at each step and must accept a time-varying rate"
+            );
+        }
     }
 
     #[test]

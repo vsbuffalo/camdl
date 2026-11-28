@@ -107,25 +107,26 @@ compartment, rather than O(M).
 propensities from scratch) prevents drift. The interval is tunable via the
 `FULL_RECOMPUTE_INTERVAL` constant.
 
-**Time-dependent transitions.** Transitions whose rate expression contains a
-`TimeFunc` (seasonal forcing, piecewise schedules) cannot be maintained by the
-compartment-change dependency graph alone. They are tracked separately in
-`time_dep_transitions` and re-evaluated whenever simulation time advances to a
-boundary (output time, intervention time), even if no integer state changed.
+**Time-varying rates are refused.** Steps 2 and 3 are the exact law only when
+every propensity stays constant until the next event. A rate that reads `t`, a
+forcing or a real compartment changes during the wait, so a model with such a
+rate requires the `TIME_VARYING_RATES` capability, which Gillespie does not
+provide, and `camdl simulate --backend gillespie` refuses it with a message
+naming chain-binomial and ODE. Holding such a rate fixed through the wait would
+give event times whose error depends on the output times, a setting chosen for
+convenience rather than accuracy.
 
 **Absorbing states.** When Λ = 0 (no events possible), the simulation fast-
 forwards to the next intervention or output time. After applying an
 intervention, propensities are recomputed — the system may become active again
 (e.g., a vaccination campaign seeds a new outbreak).
 
-**Real compartments (PDMP).** If the model contains real compartments with ODE
-equations, Gillespie operates as a Piecewise-Deterministic Markov Process
-(PDMP). Between discrete events, the real state advances continuously by RK4.
-This is an approximation for v0.1 — a correct PDMP implementation would use
-thinning to account for propensity changes driven by the real state during the
-interevent interval. The v0.1 implementation advances real state in one RK4 step
-at each event, which is accurate when real-state dynamics are slow relative to
-the event rate.
+**Real compartments.** A real compartment with an `ode {}` equation advances by
+one RK4 step over each interval between events, output times and effect times,
+driven by the integer state, which is constant over that interval. No transition
+rate may read a real compartment on this backend (see above), so the real state
+never changes a propensity during a wait. A model whose rates do read one, a
+piecewise-deterministic Markov process, needs chain-binomial or ODE.
 
 ### Complexity and scaling
 
@@ -408,19 +409,20 @@ fixed step for the sensitivities); use `rk4`.
 
 ## Comparison table
 
-| Property                | Gillespie     | Chain-binomial | ODE                |
-| ----------------------- | ------------- | -------------- | ------------------ |
-| Time type               | continuous    | discrete       | continuous         |
-| Stochastic              | yes           | yes            | no                 |
-| Exact                   | yes           | approx         | approx             |
-| Extinction behavior     | correct       | correct        | never              |
-| Step size               | event-driven  | user (--dt)    | user (--dt)        |
-| Speed (large N)         | slow          | fast           | fast               |
-| Speed (small N)         | fast          | overhead       | fast               |
-| Real compartments       | PDMP (approx) | hybrid         | native             |
-| CRN coupling            | yes           | yes            | n/a                |
-| Overdispersion          | incompatible  | supported      | incompatible       |
-| Int rounding during RK4 | n/a           | n/a            | yes (O(1/N) error) |
+| Property                | Gillespie    | Chain-binomial | ODE                |
+| ----------------------- | ------------ | -------------- | ------------------ |
+| Time type               | continuous   | discrete       | continuous         |
+| Stochastic              | yes          | yes            | no                 |
+| Exact                   | yes          | approx         | approx             |
+| Extinction behavior     | correct      | correct        | never              |
+| Step size               | event-driven | user (--dt)    | user (--dt)        |
+| Speed (large N)         | slow         | fast           | fast               |
+| Speed (small N)         | fast         | overhead       | fast               |
+| Real compartments       | unread only  | hybrid         | native             |
+| Time-varying rates      | refused      | supported      | supported          |
+| CRN coupling            | yes          | yes            | n/a                |
+| Overdispersion          | incompatible | supported      | incompatible       |
+| Int rounding during RK4 | n/a          | n/a            | yes (O(1/N) error) |
 
 **Rule of thumb:** use Gillespie for N < 10 000 and when extinction matters;
 chain-binomial for N > 10 000 in production stochastic runs (especially when the

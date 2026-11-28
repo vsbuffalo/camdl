@@ -47,6 +47,28 @@ fn load(name: &str) -> ir::Model {
     ir::from_str(&contents).unwrap_or_else(|e| panic!("failed to parse {}: {}", name, e))
 }
 
+/// `model` with every forcing reference in an expression replaced by the
+/// constant 1. The fixture's rates read the forcing `school(t)`, which changes
+/// between events, so the Gillespie backend refuses the model as written
+/// (`TIME_VARYING_RATES`); the Gillespie side of the gate runs this copy, whose
+/// bindings and their references are unchanged.
+fn forcings_held_at_one(model: &ir::Model) -> ir::Model {
+    fn replace(v: &mut serde_json::Value, one: &serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) if m.len() == 1 && m.contains_key("time_func") => {
+                *v = one.clone();
+            }
+            serde_json::Value::Object(m) => m.values_mut().for_each(|c| replace(c, one)),
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|c| replace(c, one)),
+            _ => {}
+        }
+    }
+    let one = serde_json::to_value(ir::expr::Expr::const_(1.0)).unwrap();
+    let mut v = serde_json::to_value(model).unwrap();
+    replace(&mut v, &one);
+    serde_json::from_value(v).expect("the forcing-free copy must still parse")
+}
+
 /// FNV-1a/64 over the full trajectory numeric content — the same hash the
 /// constant-fold A/B gate uses. Deterministic and platform-independent.
 fn trajectory_hash(traj: &sim::state::Trajectory) -> u64 {
@@ -95,9 +117,17 @@ fn gate_binding_cache_is_byte_identical() {
          model with hoisted bindings (per-patch N_p/I_agg_p)"
     );
 
-    let compiled = CompiledModel::new(model.clone()).expect("model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
-    let params = compiled.default_params.clone();
+    let compile = |m: ir::Model| {
+        CompiledModel::new(m).expect("model failed to compile")
+            .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() })
+    };
+    let compiled_forced = compile(model.clone());
+    let compiled_gillespie = compile(forcings_held_at_one(&model));
+    assert!(
+        compiled_forced.required_capabilities().contains(sim::Capabilities::TIME_VARYING_RATES)
+            && !compiled_gillespie.required_capabilities().contains(sim::Capabilities::TIME_VARYING_RATES),
+        "the fixture's rates must read its forcing, and the Gillespie copy's must not"
+    );
 
     let t_start = model.simulation.t_start;
     let t_end = model.simulation.t_end;
@@ -108,7 +138,6 @@ fn gate_binding_cache_is_byte_identical() {
         ("ode", SimConfig::Ode(OdeConfig { t_start, t_end, dt: 1.0 })),
     ];
 
-    let required = compiled.required_capabilities();
     let mut checked = 0usize;
     for (backend, config) in backends {
         let sim: &dyn Simulate = match *backend {
@@ -116,7 +145,9 @@ fn gate_binding_cache_is_byte_identical() {
             "ode" => &OdeSim,
             _ => &ChainBinomialSim,
         };
-        if !(required - sim.capabilities()).is_empty() {
+        let compiled = if *backend == "gillespie" { &compiled_gillespie } else { &compiled_forced };
+        let params = compiled.default_params.clone();
+        if !(compiled.required_capabilities() - sim.capabilities()).is_empty() {
             continue;
         }
 
@@ -124,7 +155,7 @@ fn gate_binding_cache_is_byte_identical() {
         set_binding_cache_disabled(true);
         let _ = take_binding_cache_hits();
         let traj_off = sim
-            .run(&compiled, &params, SEED, config)
+            .run(compiled, &params, SEED, config)
             .unwrap_or_else(|e| panic!("cache-off {backend} sim failed: {e:?}"));
         let h_off = trajectory_hash(&traj_off);
         // The B side must really be off: a cache that ignored the switch would
@@ -141,7 +172,7 @@ fn gate_binding_cache_is_byte_identical() {
         set_binding_cache_disabled(false);
         let _ = take_binding_cache_hits();
         let traj_on = sim
-            .run(&compiled, &params, SEED, config)
+            .run(compiled, &params, SEED, config)
             .unwrap_or_else(|e| panic!("cache-on {backend} sim failed: {e:?}"));
         let hits = take_binding_cache_hits();
         let h_on = trajectory_hash(&traj_on);
@@ -170,7 +201,7 @@ fn gate_binding_cache_is_byte_identical() {
         eprintln!("{backend}: byte-identical (hash 0x{h_off:016x}), cache hits = {hits}");
         checked += 1;
     }
-    assert!(checked >= 3, "expected at least 3 backends checked, got {checked}");
+    assert_eq!(checked, 3, "every backend must run the gate, got {checked}");
 
     // Leave the override cleared so other tests on this thread are unaffected.
     set_binding_cache_disabled(false);

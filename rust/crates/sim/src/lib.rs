@@ -98,6 +98,15 @@ bitflags::bitflags! {
         /// clear message, rather than silently dropping the policy. Derived from the IR by
         /// `CompiledModel::required_capabilities()`.
         const REACTIVE_INTERVENTIONS = 1 << 5;
+        /// A transition rate reads `t`, a forcing or a real compartment,
+        /// directly or through a binding, so it changes between transition
+        /// events. Chain-binomial re-evaluates every rate each step and ODE
+        /// integrates through the change; both declare this. Gillespie draws
+        /// each waiting time from the total rate at the start of the wait,
+        /// which is the exact law only when every rate is constant until the
+        /// next event, so it does not declare it. Derived from the rate ASTs by
+        /// `CompiledModel::required_capabilities()`.
+        const TIME_VARYING_RATES = 1 << 6;
     }
 }
 

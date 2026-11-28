@@ -53,6 +53,28 @@ fn load(name: &str) -> (ir::Model, usize) {
     (model, contents.len())
 }
 
+/// `model` with every forcing reference in an expression replaced by the
+/// constant 1. The fixture's rates read the forcing `school(t)`, which changes
+/// between events, so the Gillespie backend refuses the model as written
+/// (`TIME_VARYING_RATES`); the Gillespie side of the gate runs this copy, in
+/// which the fold's terms are unchanged.
+fn forcings_held_at_one(model: &ir::Model) -> ir::Model {
+    fn replace(v: &mut serde_json::Value, one: &serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) if m.len() == 1 && m.contains_key("time_func") => {
+                *v = one.clone();
+            }
+            serde_json::Value::Object(m) => m.values_mut().for_each(|c| replace(c, one)),
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|c| replace(c, one)),
+            _ => {}
+        }
+    }
+    let one = serde_json::to_value(Expr::const_(1.0)).unwrap();
+    let mut v = serde_json::to_value(model).unwrap();
+    replace(&mut v, &one);
+    serde_json::from_value(v).expect("the forcing-free copy must still parse")
+}
+
 /// Largest `Reduce` term-count anywhere in an expression tree. For this model
 /// the only `Reduce` is the spatial FOI sum, so this is its term count: P (=8)
 /// unfolded, k (=2) folded.
@@ -171,15 +193,23 @@ fn check_fold_ab(stem: &str) {
     // ── 2. SOUNDNESS ────────────────────────────────────────────────────────
     // Same source, same seed, same backend: the folded and unfolded models must
     // produce a byte-identical trajectory.
-    let compiled_unfolded = CompiledModel::new(unfolded.clone())
-        .expect("unfolded model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
-    let compiled_folded = CompiledModel::new(folded.clone())
-        .expect("folded model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
-
-    let params_unfolded = compiled_unfolded.default_params.clone();
-    let params_folded = compiled_folded.default_params.clone();
+    let compile = |m: ir::Model| {
+        CompiledModel::new(m)
+            .expect("model failed to compile")
+            .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() })
+    };
+    // (unfolded, folded) as written, and the same pair with each forcing held
+    // at 1 for Gillespie, which refuses the forced rates.
+    let forced = (compile(unfolded.clone()), compile(folded.clone()));
+    let for_gillespie = (
+        compile(forcings_held_at_one(&unfolded)),
+        compile(forcings_held_at_one(&folded)),
+    );
+    assert!(
+        forced.0.required_capabilities().contains(sim::Capabilities::TIME_VARYING_RATES)
+            && !for_gillespie.0.required_capabilities().contains(sim::Capabilities::TIME_VARYING_RATES),
+        "the fixture's rates must read its forcing, and the Gillespie copy's must not"
+    );
 
     let t_start = unfolded.simulation.t_start;
     let t_end = unfolded.simulation.t_end;
@@ -194,7 +224,6 @@ fn check_fold_ab(stem: &str) {
         ("ode", SimConfig::Ode(OdeConfig { t_start, t_end, dt: 1.0 })),
     ];
 
-    let required = compiled_unfolded.required_capabilities();
     let mut checked = 0usize;
     for (backend, config) in backends {
         let sim: &dyn Simulate = match *backend {
@@ -202,14 +231,18 @@ fn check_fold_ab(stem: &str) {
             "ode" => &OdeSim,
             _ => &ChainBinomialSim,
         };
-        if !(required - sim.capabilities()).is_empty() {
+        let (compiled_unfolded, compiled_folded) =
+            if *backend == "gillespie" { &for_gillespie } else { &forced };
+        let params_unfolded = compiled_unfolded.default_params.clone();
+        let params_folded = compiled_folded.default_params.clone();
+        if !(compiled_unfolded.required_capabilities() - sim.capabilities()).is_empty() {
             continue;
         }
         let traj_unfolded = sim
-            .run(&compiled_unfolded, &params_unfolded, SEED, config)
+            .run(compiled_unfolded, &params_unfolded, SEED, config)
             .unwrap_or_else(|e| panic!("unfolded {backend} sim failed: {e:?}"));
         let traj_folded = sim
-            .run(&compiled_folded, &params_folded, SEED, config)
+            .run(compiled_folded, &params_folded, SEED, config)
             .unwrap_or_else(|e| panic!("folded {backend} sim failed: {e:?}"));
 
         let h_unfolded = trajectory_hash(&traj_unfolded);
@@ -224,5 +257,5 @@ fn check_fold_ab(stem: &str) {
         eprintln!("{backend}: byte-identical (hash 0x{h_unfolded:016x})");
         checked += 1;
     }
-    assert!(checked >= 3, "expected at least 3 backends checked, got {checked}");
+    assert_eq!(checked, 3, "every backend must run the gate, got {checked}");
 }

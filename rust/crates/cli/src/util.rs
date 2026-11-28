@@ -3929,12 +3929,6 @@ pub fn simulate_compiled(
     if matches!(backend, ForwardBackend::Ode) {
         crate::fit::methods::warn_if_ode_euler_flow(compiled);
     }
-    // gh#95: warn (once) if a time-varying-rate model runs on gillespie — its
-    // next-event draw freezes the total rate over each exponential wait, so a
-    // seasonal/forced/bare-`t` rate is a piecewise-constant approximation.
-    if matches!(backend, ForwardBackend::Gillespie) {
-        crate::fit::methods::warn_if_gillespie_time_dep(compiled);
-    }
     // gh#125 review: an `at = [...]` output list entirely beyond the horizon is
     // confined out (`<= t_end`), leaving a header-only trajectory. Warn rather
     // than silently emit nothing.

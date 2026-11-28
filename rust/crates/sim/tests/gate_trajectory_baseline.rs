@@ -227,12 +227,10 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("death_fraction_window", "ode", 0xbd9f5fbede74c831),
     ("seir_observations", "gillespie", 0x1512c82543641dbc),
     ("seir_observations", "chain_binomial", 0x1620e4f54e9021bf),
-    ("seir_seasonal_patch", "gillespie", 0xbab747d305e59679),
     ("seir_seasonal_patch", "chain_binomial", 0x973dccbdeba49bb5),
     ("seir_spatial_5_inference", "chain_binomial", 0xfc6f6fe0c603429e),
     ("seir_vaccine", "gillespie", 0x17257cd9fa3ce428),
     ("seir_vaccine", "chain_binomial", 0xfb6b6f6bdba7e7d3),
-    ("seir_vaccine_seasonal", "gillespie", 0xaadce0ddf1d680fd),
     ("seir_vaccine_seasonal", "chain_binomial", 0xdce773319d7251e7),
     ("sia_anchored_dates", "gillespie", 0xa07df71463113b70),
     ("sia_anchored_dates", "chain_binomial", 0x5a594b3abc78f56b),
@@ -261,7 +259,6 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("sir_reservoir", "chain_binomial", 0x6f5c2c8af8307f5c),
     // Mixed int/real >=8-term aggregate (Fix-B trap #1 gate): a binding
     // extraction that reassociates the MixedPopSum fold order changes these.
-    ("sir_reservoir_mixed", "gillespie", 0xa3b890243e0932a5),
     ("sir_reservoir_mixed", "chain_binomial", 0x0597d93ff326fb1b),
     ("sir_spatial_sum", "gillespie", 0x65d363618fc40fb4),
     ("sir_spatial_sum", "chain_binomial", 0xd38ed3b3bfe9c9fa),
@@ -271,7 +268,6 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("sir_two_patch", "chain_binomial", 0xa1c9f945649cc4fa),
     ("sirs_typed_constants", "gillespie", 0x3c18d33c314c94e5),
     ("sirs_typed_constants", "chain_binomial", 0xf650b459a2371545),
-    ("sirv_anchored_calendar", "gillespie", 0xec592cdf358a308e),
     ("sirv_anchored_calendar", "chain_binomial", 0x557cef37b9b035b1),
     // ODE backend (deterministic; added per the four-backend landing
     // condition). Captured against the post-Fix-B compiler/runtime.
@@ -317,10 +313,8 @@ const BASELINES: &[(&str, &str, u64)] = &[
     // guarded FOI, surveillance likelihoods). Captured deterministically;
     // the existing 105 entries re-verified unchanged in the same run.
     // seir_pop_balance is chain_binomial-only (capability-skip on gillespie/ode).
-    ("flu_data_forcing", "gillespie", 0xbefc2c0366093bcf),
     ("flu_data_forcing", "chain_binomial", 0x7b037870200ca140),
     ("flu_data_forcing", "ode", 0x19cffc0fbaebe987),
-    ("phenom_mixing_unchecked", "gillespie", 0x5113d45f49fcb942),
     // gh#122: the sole-exit deterministic `waning : R --> S @ deterministic(omega*R)`
     // was silently FROZEN on chain_binomial (never fired); it now fires
     // `round(omega*R*dt)`, so this trajectory legitimately changed. gillespie/ode
@@ -380,24 +374,18 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("init_laws", "chain_binomial", 0x99b799b03100b590),
     ("init_laws", "ode", 0x4380a0837ed47599),
     // Proposal 2026-10-27-estimable-bsplines, Stage 2: the bspline goldens.
-    ("bspline_explicit_dated", "gillespie", 0x6d409b1965f13b65),
     ("bspline_explicit_dated", "chain_binomial", 0xb4a811feedac1b5b),
     ("bspline_explicit_dated", "ode", 0xcfa98a6ed9cee28e),
-    ("bspline_loglink", "gillespie", 0x465ecee2338159ea),
     ("bspline_loglink", "chain_binomial", 0x209b243097058672),
     ("bspline_loglink", "ode", 0x385570b89043af92),
-    ("bspline_uniform", "gillespie", 0x91b4a603d987b168),
     ("bspline_uniform", "chain_binomial", 0xf85d1d1c21a643d5),
     ("bspline_uniform", "ode", 0x8b8ae7af91fe1f95),
     // Stage 3: spline goldens whose coefficients are parameters.
-    ("bspline_param_coefs", "gillespie", 0x711be32341d5833b),
     ("bspline_param_coefs", "chain_binomial", 0x6d94006874330c0d),
     ("bspline_param_coefs", "ode", 0x46e789af0ff4f237),
-    ("periodic_spline_param_coefs", "gillespie", 0x91e0fa361b9b582e),
     ("periodic_spline_param_coefs", "chain_binomial", 0xf3c885ca748c7332),
     ("periodic_spline_param_coefs", "ode", 0x9c8c60c464ffae4b),
     // Stage 4: the smooth coefficient form.
-    ("bspline_smooth", "gillespie", 0x4605de1eeca43b71),
     ("bspline_smooth", "chain_binomial", 0x2b507a88e97aa14b),
     ("bspline_smooth", "ode", 0x28f33e5669543cc4),
 ];
@@ -487,6 +475,10 @@ fn gate_golden_trajectories_are_byte_identical() {
 
     let mut captured: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
+    // Every (model, backend) this gate ran, so a baseline row that no run
+    // checks (a model removed, or a backend that now refuses it) fails the gate
+    // rather than passing unexercised.
+    let mut ran: Vec<(String, String)> = Vec::new();
 
     for name in &models {
         let mut model = load_and_apply_baseline(name);
@@ -522,6 +514,7 @@ fn gate_golden_trajectories_are_byte_identical() {
                 Err(_) => continue, // baseline-time sim errors are not this gate's concern
             };
             let hash = trajectory_hash(&traj);
+            ran.push((name.to_string(), backend.to_string()));
             if capture {
                 captured.push(format!("    (\"{name}\", \"{backend}\", 0x{hash:016x}),"));
             } else {
@@ -547,6 +540,14 @@ fn gate_golden_trajectories_are_byte_identical() {
         assert!(
             missing.is_empty(),
             "no baseline for: {missing:?} — run with CAMDL_CAPTURE_BASELINE=1 and paste the table"
+        );
+        let unexercised: Vec<String> = BASELINES.iter()
+            .filter(|(n, b, _)| !ran.iter().any(|(rn, rb)| rn == n && rb == b))
+            .map(|(n, b, _)| format!("{n}/{b}"))
+            .collect();
+        assert!(
+            unexercised.is_empty(),
+            "baseline rows that no run checks: {unexercised:?} — delete them from BASELINES"
         );
     }
 }

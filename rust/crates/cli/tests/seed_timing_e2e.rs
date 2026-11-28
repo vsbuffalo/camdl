@@ -6,10 +6,9 @@
 //! `#[lineage]`-tracked `I` compartment.
 //!
 //! Coverage:
-//!   1. Dynamics respond to `tau`, AND Gillespie agrees with chain-binomial.
-//!      This is the end-to-end regression for the frozen-propensity bug
-//!      (incident 2026-05-20-gillespie-bare-time-frozen-propensity): before the
-//!      fix, a late seed produced zero inflow and no epidemic on Gillespie.
+//!   1. Dynamics respond to `tau` on chain-binomial, and the Gillespie backend
+//!      refuses the model, whose seed rate reads `t` and so changes between
+//!      events (incident 2026-05-20-gillespie-bare-time-frozen-propensity).
 //!   2. The seed inflow is Import-rooted in the realized line list (the §8
 //!      lineage contract): a source-less inflow into a tracked compartment is
 //!      minted with `parent = Import`, with no `#[lineage]` annotation.
@@ -115,35 +114,50 @@ fn simulate_summary(camdl: &Path, backend: &str, tau: f64, out: &Path) -> (i64, 
     traj_summary(out)
 }
 
-/// 1. Dynamics respond to `tau`, and Gillespie matches chain-binomial.
+/// Coverage item 1: dynamics respond to `tau` on chain-binomial, which
+/// evaluates the pulse's rate at every step.
 #[test]
-fn seed_pulse_shifts_onset_and_backends_agree() {
+fn seed_pulse_shifts_onset() {
     let camdl = camdl_bin();
     let tmp = tempdir("dyn");
 
-    for backend in ["gillespie", "chain_binomial"] {
-        let early = simulate_summary(&camdl, backend, 15.0, &tmp.join(format!("{backend}_15.tsv")));
-        let late = simulate_summary(&camdl, backend, 45.0, &tmp.join(format!("{backend}_45.tsv")));
+    let early = simulate_summary(&camdl, "chain_binomial", 15.0, &tmp.join("cb_15.tsv"));
+    let late = simulate_summary(&camdl, "chain_binomial", 45.0, &tmp.join("cb_45.tsv"));
 
-        // An epidemic must occur in BOTH cases. The late-seed Gillespie run is
-        // the direct regression: pre-fix it produced 0 seed inflow / no epidemic.
-        assert!(early.0 > 200, "{backend} tau=15: expected an epidemic, peak_I={}", early.0);
-        assert!(late.0 > 200, "{backend} tau=45: expected an epidemic, peak_I={} (frozen-propensity regression?)", late.0);
-        assert!(late.2 > 0, "{backend} tau=45: seed inflow must be > 0 (frozen-propensity regression?), got {}", late.2);
+    // An epidemic must occur in both cases, and the late seed must flow.
+    assert!(early.0 > 200, "tau=15: expected an epidemic, peak_I={}", early.0);
+    assert!(late.0 > 200, "tau=45: expected an epidemic, peak_I={}", late.0);
+    assert!(late.2 > 0, "tau=45: seed inflow must be > 0, got {}", late.2);
 
-        // A later seed → a later epidemic onset.
-        let (e_onset, l_onset) = (early.1.expect("early onset"), late.1.expect("late onset"));
-        assert!(l_onset > e_onset, "{backend}: later seed (tau=45) should onset after tau=15: {l_onset} vs {e_onset}");
+    // A later seed gives a later epidemic onset.
+    let (e_onset, l_onset) = (early.1.expect("early onset"), late.1.expect("late onset"));
+    assert!(l_onset > e_onset, "later seed (tau=45) should onset after tau=15: {l_onset} vs {e_onset}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The pulse's rate reads `t`, so it changes during a Gillespie wait: the
+/// Gillespie backend refuses the model and names the backends that run it.
+#[test]
+fn seed_pulse_is_refused_on_gillespie() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("gillespie");
+    let ir = model_ir();
+    let out = tmp.join("g.tsv");
+    let mut args = vec![
+        "simulate", ir.to_str().unwrap(),
+        "--backend", "gillespie", "--dt", "1", "--seed", "7",
+        "--param", "tau=30",
+    ];
+    args.extend_from_slice(BASE_PARAMS);
+    args.extend(["--output", out.to_str().unwrap()]);
+    let o = run(&camdl, &args);
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "gillespie must refuse a rate that reads `t`; stderr={stderr}");
+    for want in ["TIME_VARYING_RATES", "chain_binomial", "\"ode\""] {
+        assert!(stderr.contains(want), "the refusal must name {want:?}; stderr={stderr}");
     }
-
-    // Cross-backend agreement on total seed inflow at tau=30 (within 30% — the
-    // residual is Gillespie's output-grid re-evaluation vs chain-binomial's
-    // per-substep evaluation, not the freeze).
-    let g = simulate_summary(&camdl, "gillespie", 30.0, &tmp.join("g30.tsv")).2 as f64;
-    let c = simulate_summary(&camdl, "chain_binomial", 30.0, &tmp.join("c30.tsv")).2 as f64;
-    assert!(g > 0.0 && c > 0.0, "both backends must seed at tau=30: g={g} c={c}");
-    let rel = (g - c).abs() / c;
-    assert!(rel < 0.30, "Gillespie/chain-binomial seed inflow disagree: g={g} c={c} (rel={rel:.2})");
+    assert!(!out.exists(), "a refused run must write no trajectory");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
