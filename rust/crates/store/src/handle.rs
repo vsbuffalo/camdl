@@ -147,13 +147,23 @@ impl Store {
 
     /// The completed result a handle names. A label that names an invocation
     /// with several results of kind `A` is refused with
-    /// [`Error::NotOneResult`].
+    /// [`Error::NotOneResult`], and a result whose folder's records or files
+    /// no longer match with [`Error::Damaged`], naming what differs.
     pub fn resolve<A: Artifact>(&self, handle: &RunRef<A>) -> Result<Stored<A>> {
         let (key, kind) = self.resolve_key(&handle.handle, A::KIND)?;
         if kind != A::KIND {
             return Err(Error::WrongKind { handle: handle.handle.to_string(), expected: A::KIND, found: kind });
         }
-        self.get(&Id::<A>::from_key(key))?.ok_or_else(|| Error::NotFound { handle: handle.handle.to_string() })
+        if let Some(stored) = self.get(&Id::<A>::from_key(key))? {
+            return Ok(stored);
+        }
+        // `get` reads a damaged folder as absent, so that a command that then
+        // begins the result computes it again. A handle names a stored
+        // result to read, so its damage is the answer.
+        match self.inner.damage_of(A::KIND, &key)? {
+            Some(what) => Err(Error::Damaged { run_id: key, what }),
+            None => Err(Error::NotFound { handle: handle.handle.to_string() }),
+        }
     }
 
     /// The result a handle names, in any status.

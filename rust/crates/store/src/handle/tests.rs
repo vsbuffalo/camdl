@@ -319,3 +319,25 @@ fn a_command_sees_its_own_record_without_reading_the_records_again() {
     assert_eq!(store.invocation(&Handle::IdPrefix(s.id().key().to_hex())).unwrap().label(), Some("mine"));
     assert_eq!(record_reads(&store), 3, "the snapshot, the label check at the start and the previous holder at the end");
 }
+
+/// A handle naming a result whose file has changed size is refused as
+/// damaged, naming the result and the file, not as a result that is not
+/// stored.
+#[test]
+fn a_handle_to_a_damaged_result_is_refused_as_damaged() {
+    let root = TempRoot::new("resolve-damaged");
+    let store = open(root.path());
+    let stored = run_sim(&store, &info(), 41);
+    let file = stored.folder().join("traj.tsv");
+    let mut bytes = std::fs::read(&file).unwrap();
+    bytes.extend_from_slice(b"1\t9\n");
+    std::fs::write(&file, bytes).unwrap();
+    match resolve_sim(&store, &stored.id().key().to_hex()) {
+        Err(Error::Damaged { run_id, what }) => {
+            assert_eq!(run_id, stored.id().key());
+            assert!(what.contains("`traj.tsv`") && what.contains("changed size"), "{what}");
+        }
+        Err(other) => panic!("refused as damaged, not: {other}"),
+        Ok(_) => panic!("a damaged result is refused"),
+    }
+}

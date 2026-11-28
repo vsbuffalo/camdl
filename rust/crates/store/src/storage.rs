@@ -903,11 +903,25 @@ impl Inner {
         Ok(found.into_iter().find(|(_, f)| &f.run_id == run_id))
     }
 
-    /// The folder and record of a completed, undamaged result.
+    /// The folder and record of a completed, undamaged result. A folder in
+    /// any other state, damaged included, is `None`, so a caller that then
+    /// begins the result moves the damaged folder to `.quarantine/` and
+    /// computes it again.
     pub(crate) fn find_completed(&self, kind: &str, run_id: &Key) -> Result<Option<(PathBuf, RunFile)>> {
         let Some(dir) = self.find_any(kind, run_id)? else { return Ok(None) };
         match folder_state(&dir, run_id, &self.kinds) {
             State::Completed { dir, run } => Ok(Some((dir, *run))),
+            _ => Ok(None),
+        }
+    }
+
+    /// What is damaged in the folder of `run_id`, when one is found and its
+    /// records or files no longer match; `None` for a folder in any other
+    /// state, or none.
+    pub(crate) fn damage_of(&self, kind: &str, run_id: &Key) -> Result<Option<String>> {
+        let Some(dir) = self.find_any(kind, run_id)? else { return Ok(None) };
+        match folder_state(&dir, run_id, &self.kinds) {
+            State::Damaged { what, .. } => Ok(Some(what)),
             _ => Ok(None),
         }
     }

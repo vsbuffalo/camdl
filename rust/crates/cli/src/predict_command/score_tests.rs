@@ -605,6 +605,30 @@ fn a_hand_edited_prediction_is_refused() {
     assert!(scores(&root).is_empty());
 }
 
+/// A stored prediction whose file has changed size is refused by its handle
+/// as damaged, naming the file, not as a prediction that is not stored.
+#[test]
+fn a_prediction_whose_file_changed_size_is_refused_as_damaged() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(&predict_in(cwd.path(), &root, &[FIXED, &["--label", "ff"]].concat()), "predict");
+    let (folder, _) = predictions(&root).into_iter().next().unwrap();
+    let file = folder.join("predictive/daily_cases.tsv");
+    let mut perms = std::fs::metadata(&file).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&file, perms).unwrap();
+    let mut bytes = std::fs::read(&file).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(&file, bytes).unwrap();
+    let out = score_in(cwd.path(), &root, &["@ff", "--data", "daily_cases=daily_cases.tsv"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("is damaged: the file `predictive/daily_cases.tsv` has changed size"), "{err}");
+    assert!(scores(&root).is_empty());
+}
+
 /// An outcome row after the conditioning rows that ends before the last of
 /// them is refused: the one-step pass would assimilate it before rows the
 /// prediction predicted. The data loader refuses such a file, whose rows are
