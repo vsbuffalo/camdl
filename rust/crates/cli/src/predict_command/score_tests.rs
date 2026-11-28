@@ -775,3 +775,82 @@ fn the_two_layouts_share_a_core_and_carry_their_own_columns() {
     assert_eq!(manifest["schema"], "camdl.score/v2");
     assert!(manifest["modes"]["forecast"].is_object(), "score.json records the mode: {manifest:#}");
 }
+
+/// Each row of `stream` in a score's `file`, as `(t_stop, assimilated_through)`.
+fn assimilated(folder: &Path, file: &str, stream: Option<&str>) -> Vec<(String, String)> {
+    tsv_rows(&read(folder, file))
+        .into_iter()
+        .filter(|r| stream.is_none_or(|s| r["stream"] == s))
+        .map(|r| (r["t_stop"].clone(), r["assimilated_through"].clone()))
+        .collect()
+}
+
+/// In a one-step score of the daily and the weekly stream, each weekly row
+/// was predicted after the daily row ending a day before it was assimilated,
+/// and not the daily row ending with it; the score writes no `lead`. The
+/// joint row at a stop carries the same value, and the first stop has
+/// nothing assimilated before it.
+#[test]
+fn a_weekly_rows_assimilated_through_is_the_daily_row_before_it() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let folder = two_stream_one_step(&root, cwd.path());
+    assert!(!header_of(&folder, "scored_rows.tsv").contains(&"lead".to_string()));
+    let weekly = assimilated(&folder, "scored_rows.tsv", Some("weekly_cases"));
+    assert_eq!(weekly.len(), 9, "{weekly:?}");
+    for (stop, through) in &weekly {
+        let stop: f64 = stop.parse().unwrap();
+        assert_eq!(through.parse::<f64>().unwrap(), stop - 1.0, "the weekly row ending {stop}");
+    }
+    let daily = assimilated(&folder, "scored_rows.tsv", Some("daily_cases"));
+    assert_eq!(daily[0], ("1".to_string(), String::new()), "nothing is assimilated before the first stop");
+    assert_eq!(daily[1], ("2".to_string(), "1".to_string()));
+    let joints = assimilated(&folder, "joint_rows.tsv", None);
+    assert!(joints.contains(&("14".to_string(), "13".to_string())), "{joints:?}");
+}
+
+/// With the weekly stream alone, a row was predicted after the previous
+/// week's row was assimilated. An `NA` row is not assimilated, so the row
+/// after it was predicted from the week before; a held-out row is
+/// assimilated after it is scored, so it counts for the rows after it. A
+/// free-forward score writes the column empty.
+#[test]
+fn assimilated_through_skips_an_na_row_and_counts_a_held_out_one() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let weekly = std::fs::read_to_string(cwd.path().join("weekly_cases.tsv")).unwrap();
+    let with_na: String = weekly.lines().map(|l| if l.starts_with("14\t") { "14\tNA\n".to_string() } else { format!("{l}\n") }).collect();
+    assert_ne!(with_na, weekly, "the fixture's weekly row 14 moved");
+    std::fs::write(cwd.path().join("weekly_na.tsv"), with_na).unwrap();
+    let data = ["--data", "weekly_cases=weekly_na.tsv"];
+    let base = ["predict", "model.camdl", "--params", "point.toml", "--n-draws", "2", "--holdout-after", "24"];
+    let one_step = ["--mode", "one_step", "--particles", "40", "--label", "os"];
+    ok(&predict_in(cwd.path(), &root, &[&base[..], &data, &one_step].concat()), "predict");
+    ok(&score_in(cwd.path(), &root, &[&["@os"][..], &data].concat()), "score");
+    let folder = the_score(&root);
+    let rows = tsv_rows(&read(&folder, "scored_rows.tsv"));
+    let through: Vec<(&str, &str, &str)> =
+        rows.iter().map(|r| (r["t_stop"].as_str(), r["role"].as_str(), r["assimilated_through"].as_str())).collect();
+    assert_eq!(
+        through,
+        [
+            ("7", "trained", ""),
+            ("21", "trained", "7"),
+            ("28", "held_out", "21"),
+            ("35", "held_out", "28"),
+            ("42", "held_out", "35"),
+            ("49", "held_out", "42"),
+            ("56", "held_out", "49"),
+            ("63", "held_out", "56"),
+        ],
+        "the NA row of day 14 is not scored and not assimilated; the held-out row of day 28 counts for day 35"
+    );
+
+    ok(&predict_in(cwd.path(), &root, &[&base[..], &data, &["--mode", "free_forward", "--label", "ff"]].concat()), "predict");
+    ok(&score_in(cwd.path(), &root, &[&["@ff"][..], &data].concat()), "score");
+    let ff = scores(&root).into_iter().map(|(p, _)| p).find(|p| *p != folder).unwrap();
+    let rows = tsv_rows(&read(&ff, "scored_rows.tsv"));
+    assert!(!rows.is_empty() && rows.iter().all(|r| r["mode"] == "free_forward" && r["assimilated_through"].is_empty()), "{rows:?}");
+}

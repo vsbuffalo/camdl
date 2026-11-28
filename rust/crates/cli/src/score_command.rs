@@ -725,6 +725,8 @@ enum ScoredLines<'a> {
 struct DataRowLine<'a> {
     core: CoreLine<'a>,
     mode: DataRowMode,
+    /// `None` on free-forward rows.
+    assimilated_through: Option<f64>,
 }
 
 /// A scored forecast target.
@@ -872,6 +874,24 @@ impl Columns<'_> {
         row
     }
 
+    /// `assimilated_through` and, in a dated model,
+    /// `date_assimilated_through`.
+    fn assimilated_header(&self) -> Vec<String> {
+        let mut h = vec!["assimilated_through".to_string()];
+        if self.dated() {
+            h.push("date_assimilated_through".into());
+        }
+        h
+    }
+
+    fn assimilated_cells(&self, through: Option<f64>) -> Vec<String> {
+        let mut row = vec![through.map(fmt_time).unwrap_or_default()];
+        if self.dated() {
+            row.push(through.map(|t| self.date(t)).unwrap_or_default());
+        }
+        row
+    }
+
     /// `t_start`, `t_stop` and, in a dated model, `date_start` and
     /// `date_stop`.
     fn period_header(&self) -> Vec<String> {
@@ -978,7 +998,9 @@ fn lines_of<'a>(scored: &'a Scored, rules: &ScoreRules, forecast: bool) -> Resul
             unscored: c.log_liks.is_empty(),
         };
         match (&mut lines, c.kind) {
-            (ScoredLines::DataRows(v), CellKind::DataRow { mode }) => v.push(DataRowLine { core, mode }),
+            (ScoredLines::DataRows(v), CellKind::DataRow { mode, assimilated_through }) => {
+                v.push(DataRowLine { core, mode, assimilated_through })
+            }
             (ScoredLines::Targets(v), CellKind::Target { origin, periods_ahead, lead }) => {
                 v.push(TargetLine { core, origin, periods_ahead, lead })
             }
@@ -1066,9 +1088,11 @@ fn render(
                 }
                 let mut row = cols.core_cells(&l.core, labels.parameters);
                 row.push(l.mode.as_str().into());
+                row.extend(cols.assimilated_cells(l.assimilated_through));
                 scored_rows.push(row);
             }
             for j in &joints {
+                let JointKind::DataRow { assimilated_through } = j.kind else { unreachable!("checked by lines_of") };
                 let mut key = cols.arm_cells(j.scenario, j.sweep);
                 key.push(j.role.as_str().into());
                 joint_groups.entry(key).add(j.log_score, None, j.unscored);
@@ -1077,7 +1101,9 @@ fn render(
                 }
                 let mut row = cols.arm_cells(j.scenario, j.sweep);
                 row.extend(cols.period_cells(j.start, j.stop));
-                row.extend([j.role.as_str().to_string(), j.streams.join(","), num(j.log_score)]);
+                row.extend([j.role.as_str().to_string(), j.streams.join(",")]);
+                row.extend(cols.assimilated_cells(assimilated_through));
+                row.push(num(j.log_score));
                 joint_rows.push(row);
             }
             (
@@ -1124,6 +1150,8 @@ fn render(
     match &lines {
         ScoredLines::DataRows(_) => {
             scored_header.push("mode".into());
+            scored_header.extend(cols.assimilated_header());
+            joint_header.extend(cols.assimilated_header());
         }
         ScoredLines::Targets(_) => {
             scored_header.extend(["origin", "periods_ahead", "lead"].map(String::from));

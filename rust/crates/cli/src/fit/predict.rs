@@ -4634,7 +4634,7 @@ fn free_forward_scored(
                 stratum: o.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect(),
                 start,
                 stop,
-                kind: CellKind::DataRow { mode: DataRowMode::FreeForward },
+                kind: CellKind::DataRow { mode: DataRowMode::FreeForward, assimilated_through: None },
                 role,
                 observed: *y,
                 samples: accum.samples[si][ti].clone(),
@@ -5931,6 +5931,7 @@ fn one_step_scored(
     let contribution = draw_contribution;
     // Per stop: the cells scored there, by index into `scored.cells`.
     let mut at_stop: Vec<Vec<usize>> = vec![Vec::new(); obs_times.len()];
+    let assimilated_through = assimilated_through(obs_streams, stream_names, obs_times);
     for (si, name) in stream_names.iter().enumerate() {
         let leaf = leaf_of_name[name.as_str()];
         let rows = &obs_streams.iter().find(|s| &s.name == name).expect("a filter stream is a bound stream").rows;
@@ -5969,7 +5970,7 @@ fn one_step_scored(
                 stratum: leaf.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect(),
                 start: row.measures.start(),
                 stop: end,
-                kind: CellKind::DataRow { mode: DataRowMode::OneStep },
+                kind: CellKind::DataRow { mode: DataRowMode::OneStep, assimilated_through: assimilated_through[ti] },
                 role: training_rows.role(name, position),
                 observed: y,
                 samples,
@@ -5999,7 +6000,7 @@ fn one_step_scored(
         scored.joints.push(JointCell {
             scenario: String::new(),
             sweep: Vec::new(),
-            kind: JointKind::DataRow,
+            kind: JointKind::DataRow { assimilated_through: assimilated_through[ti] },
             start: cells.iter().map(|&c| scored.cells[c].start).fold(f64::INFINITY, f64::min),
             stop: obs_times[ti],
             role,
@@ -6008,6 +6009,40 @@ fn one_step_scored(
         });
     }
     Ok(scored)
+}
+
+/// Per stop of the one-step filter, the end of the latest row with a value,
+/// of any of the streams `stream_names`, that ends at an earlier stop: what
+/// the filter had assimilated when it predicted the rows ending there. At
+/// each stop the filter predicts every row that ends there before it
+/// assimilates those with a value, so a row ending at the same stop does not
+/// count; an `NA` row and a held-out cell are never assimilated. `None` where
+/// no row was assimilated before the stop.
+fn assimilated_through(obs_streams: &[crate::fit::runner::ObsStream], stream_names: &[String], obs_times: &[f64]) -> Vec<Option<f64>> {
+    // The latest end of a row with a value at each stop.
+    let mut at: Vec<Option<f64>> = vec![None; obs_times.len()];
+    for s in obs_streams.iter().filter(|s| stream_names.contains(&s.name)) {
+        for row in &s.rows {
+            if !matches!(row.cell, Some(sim::inference::ObsCell::Scalar(_))) {
+                continue;
+            }
+            let end = row.measures.end();
+            if let Some(ti) = obs_times.iter().position(|t| (t - end).abs() <= crate::OBS_SNAP_EPS) {
+                at[ti] = Some(at[ti].map_or(end, |e| e.max(end)));
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..obs_times.len()).collect();
+    order.sort_by(|&a, &b| obs_times[a].total_cmp(&obs_times[b]));
+    let mut through = vec![None; obs_times.len()];
+    let mut latest: Option<f64> = None;
+    for &ti in &order {
+        through[ti] = latest;
+        if let Some(e) = at[ti] {
+            latest = Some(latest.map_or(e, |l| l.max(e)));
+        }
+    }
+    through
 }
 
 /// What one draw's one-step record contributes at stop `ti` to the row of

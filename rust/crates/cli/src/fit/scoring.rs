@@ -73,7 +73,11 @@ impl DataRowMode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum CellKind {
     /// A data row, predicted free-forward or one step ahead.
-    DataRow { mode: DataRowMode },
+    /// `assimilated_through` is the end of the latest row, of any stream,
+    /// the one-step filter had assimilated before it predicted this one;
+    /// `None` for a free-forward row, which is conditioned on no row, and
+    /// for a one-step row predicted before any row was assimilated.
+    DataRow { mode: DataRowMode, assimilated_through: Option<f64> },
     /// A forecast target: the origin it is forecast from, how many of its
     /// stream's periods ahead of the origin it is, from 1, and the time from
     /// the origin to its end.
@@ -83,7 +87,7 @@ pub(crate) enum CellKind {
 impl CellKind {
     pub(crate) fn mode(&self) -> ScoreMode {
         match self {
-            CellKind::DataRow { mode } => mode.score_mode(),
+            CellKind::DataRow { mode, .. } => mode.score_mode(),
             CellKind::Target { .. } => ScoreMode::Forecast,
         }
     }
@@ -93,8 +97,10 @@ impl CellKind {
 /// one-step prediction, or a forecast's targets.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum JointKind {
-    /// The rows of every stream that end at one stop of the one-step filter.
-    DataRow,
+    /// The rows of every stream that end at one stop of the one-step filter,
+    /// with the end of the latest row the filter had assimilated before
+    /// predicting them, as [`CellKind::DataRow`] has it.
+    DataRow { assimilated_through: Option<f64> },
     /// The targets of a forecast from `origin`: those ending at one time,
     /// which share the `lead`, or with `lead` `None` every target of the
     /// forecast.
@@ -104,7 +110,7 @@ pub(crate) enum JointKind {
 impl JointKind {
     pub(crate) fn mode(&self) -> ScoreMode {
         match self {
-            JointKind::DataRow => ScoreMode::OneStep,
+            JointKind::DataRow { .. } => ScoreMode::OneStep,
             JointKind::Target { .. } => ScoreMode::Forecast,
         }
     }
