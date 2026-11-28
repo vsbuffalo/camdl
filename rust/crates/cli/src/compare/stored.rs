@@ -29,11 +29,13 @@
 //! the first score. An ODE free-forward score does not depend on the seed and
 //! is predicted once.
 //!
-//! The rows of one mode are read back from the score's `scored.tsv` and
-//! grouped by role (and, for a forecast, by lead), and each group becomes one
-//! [`PrequentialTrace`]: a step per row end, its log score the score's
-//! `joint` row there (the one stream's own when one stream is observed
-//! there), and each stream's own scores beside it. Nothing is recomputed:
+//! The rows of one mode are read back from the score's files of that mode's
+//! kind, `scored_rows.tsv` and `joint_rows.tsv` for free-forward and one-step,
+//! `scored_targets.tsv` and `joint_targets.tsv` for a forecast, and grouped by
+//! role (and, for a forecast, by lead), and each group becomes one
+//! [`PrequentialTrace`]: a step per row end, its log score the score's joint
+//! row there (the one stream's own when one stream is observed there), and
+//! each stream's own scores beside it. Nothing is recomputed:
 //! every number a trace holds is one the score stored, except that
 //! replicates combine the log scores of several stored scores.
 
@@ -605,7 +607,7 @@ fn score_of(
     }
     let found: Vec<store::Stored<Score>> = stored_scores(store, p)?
         .into_iter()
-        .filter(|s| scored_rows(s).is_ok_and(|rows| rows.iter().any(|r| r["mode"] == mode_name(mode) && r["role"] != "trained")))
+        .filter(|s| rows_of_mode(s, mode_name(mode)).is_ok_and(|(rows, _)| rows.iter().any(|r| r["role"] != "trained")))
         .collect();
     match found.len() {
         1 => Ok(found.into_iter().next().expect("one")),
@@ -661,16 +663,58 @@ fn stored_scores(store: &store::Store, p: &store::Stored<Prediction>) -> Result<
 
 type Line = BTreeMap<String, String>;
 
-/// The rows of a score's `scored.tsv`, each by column name.
-fn scored_rows(s: &store::Stored<Score>) -> Result<Vec<Line>, String> {
-    let bytes = crate::camdl_store::read_stored(s, "scored.tsv")?;
-    let text = String::from_utf8(bytes).map_err(|e| format!("{}: scored.tsv: {e}", s.folder().display()))?;
+/// The rows of the score file `name` of `s`, each by column name; none when
+/// the score holds no such file, as a score of the other kind does not.
+fn tsv_lines(s: &store::Stored<Score>, name: &str) -> Result<Vec<Line>, String> {
+    if !s.result_files().contains(&name) {
+        return Ok(Vec::new());
+    }
+    let bytes = crate::camdl_store::read_stored(s, name)?;
+    let text = String::from_utf8(bytes).map_err(|e| format!("{}: {name}: {e}", s.folder().display()))?;
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
     Ok(lines
         .filter(|l| !l.is_empty())
         .map(|l| header.iter().map(|h| h.to_string()).zip(l.split('\t').map(str::to_string)).collect())
         .collect())
+}
+
+/// The per-stream rows of `s` predicted in `mode`, and its joint rows of that
+/// mode: a forecast's from the target files, a free-forward or one-step
+/// prediction's from the data-row files, whose joint rows are all one-step.
+fn rows_of_mode(s: &store::Stored<Score>, mode: &str) -> Result<(Vec<Line>, Vec<Line>), String> {
+    use crate::result_files::{fit::ScoreFile, ResultFile};
+    if mode == "forecast" {
+        return Ok((tsv_lines(s, &ScoreFile::ScoredTargets.stored())?, tsv_lines(s, &ScoreFile::JointTargets.stored())?));
+    }
+    let rows: Vec<Line> = tsv_lines(s, &ScoreFile::ScoredRows.stored())?.into_iter().filter(|r| r["mode"] == mode).collect();
+    let joints = match mode {
+        "one_step" => tsv_lines(s, &ScoreFile::JointRows.stored())?,
+        _ => Vec::new(),
+    };
+    Ok((rows, joints))
+}
+
+/// `score.json` of `s`, refused when it is not of the layout this build
+/// reads.
+fn score_manifest(s: &store::Stored<Score>) -> Result<serde_json::Value, String> {
+    parse_score_manifest(&crate::camdl_store::read_stored(s, "score.json")?, &s.folder().display().to_string())
+}
+
+/// The `score.json` `bytes` of the score at `folder`, refused when they are
+/// not JSON or carry a `schema` tag other than the one this build writes: a
+/// score stored in another layout is scored again rather than read as this
+/// one.
+fn parse_score_manifest(bytes: &[u8], folder: &str) -> Result<serde_json::Value, String> {
+    let manifest: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("{folder}: score.json: {e}"))?;
+    match manifest["schema"].as_str() {
+        Some(tag) if tag == crate::score_command::SCORE_SCHEMA => Ok(manifest),
+        tag => Err(format!(
+            "the score {folder} is tagged `{}`, where this build reads `{}`; score its prediction again with `camdl score`",
+            tag.unwrap_or("(none)"),
+            crate::score_command::SCORE_SCHEMA
+        )),
+    }
 }
 
 /// What every row of a prediction's scores shares: the data it conditioned
@@ -809,21 +853,15 @@ fn groups_of(
     context: &Context,
     text: &str,
 ) -> Result<Vec<Group>, String> {
-    let manifest: serde_json::Value = serde_json::from_slice(&crate::camdl_store::read_stored(s, "score.json")?)
-        .map_err(|e| format!("{}: score.json: {e}", s.folder().display()))?;
-    let all = scored_rows(s)?;
-    let modes: Vec<&str> = {
-        let mut m: Vec<&str> = all.iter().map(|r| r["mode"].as_str()).collect();
-        m.sort();
-        m.dedup();
-        m
-    };
+    let manifest = score_manifest(s)?;
+    let modes: Vec<&str> = manifest["modes"].as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
     let mode = match req.mode {
         Some(m) => mode_name(m),
         None if req.horizon.is_some() => "forecast",
         None => ["one_step", "free_forward", "forecast"].into_iter().find(|m| modes.contains(m)).unwrap_or("one_step"),
     };
-    let rows: Vec<&Line> = all.iter().filter(|r| r["mode"] == mode).collect();
+    let (all, all_joints) = rows_of_mode(s, mode)?;
+    let rows: Vec<&Line> = all.iter().collect();
     if rows.is_empty() {
         return Err(format!(
             "'{text}': its score {} holds no {mode} rows; it holds {}",
@@ -831,7 +869,7 @@ fn groups_of(
             if modes.is_empty() { "none".to_string() } else { modes.join(", ") }
         ));
     }
-    if let Some(col) = all.first().and_then(|r| r.keys().find(|k| k.starts_with("sweep:")).cloned()) {
+    if let Some(col) = rows.first().and_then(|r| r.keys().find(|k| k.starts_with("sweep:")).cloned()) {
         return Err(format!("'{text}': its score is of a sweep (`{col}`), and compare compares one parameter point"));
     }
     // One scenario: the prediction's arm with no overlay when it made several.
@@ -846,6 +884,7 @@ fn groups_of(
         },
     };
     let rows: Vec<&Line> = rows.into_iter().filter(|r| r["scenario"] == scenario).collect();
+    let joints: Vec<&Line> = all_joints.iter().filter(|r| r["scenario"] == scenario).collect();
     let roles: Vec<&str> = {
         let mut v: Vec<&str> = rows.iter().map(|r| r["role"].as_str()).collect();
         v.sort();
@@ -874,7 +913,8 @@ fn groups_of(
         "trained"
     };
     let rows: Vec<&Line> = rows.into_iter().filter(|r| r["role"] == role).collect();
-    if rows.iter().all(|r| r["stream"] == "joint") {
+    let joints: Vec<&Line> = joints.into_iter().filter(|r| r["role"] == role).collect();
+    if rows.is_empty() {
         return Err(format!(
             "'{text}': its score holds no {mode} rows of role {role}; their roles are {}",
             roles.join(", ")
@@ -970,8 +1010,10 @@ fn groups_of(
     };
     let mut groups = Vec::with_capacity(lead_keys.len());
     for lead in lead_keys {
-        let mine: Vec<&Line> = rows.iter().copied().filter(|r| lead.as_ref().is_none_or(|l| &r["lead"] == l)).collect();
-        let (steps, no_joint) = steps_of(&mine, mode != "free_forward")?;
+        let of_lead = |r: &&&Line| lead.as_ref().is_none_or(|l| &r["lead"] == l);
+        let mine: Vec<&Line> = rows.iter().filter(of_lead).copied().collect();
+        let my_joints: Vec<&Line> = joints.iter().filter(of_lead).copied().collect();
+        let (steps, no_joint) = steps_of(&mine, &my_joints)?;
         let mut trace = PrequentialTrace {
             schema_version: score::trace::SCHEMA_RECORDING_HELD_FORCINGS,
             t0: 0,
@@ -1012,15 +1054,15 @@ fn groups_of(
 
 /// One step per row end of `rows` (one role, and one lead for a forecast),
 /// in time order: each stream's own scores, and the step's log score, the
-/// `joint` row at that end when `joint` is read and one is there, else the
-/// one stream's own. The second value is the first end at which several
-/// streams are scored with no joint row, whose step score is NaN.
-fn steps_of(rows: &[&Line], joint: bool) -> Result<(Vec<PrequentialStep>, Option<f64>), String> {
+/// row of `joints` at that end when there is one, else the one stream's own.
+/// The second value is the first end at which several streams are scored
+/// with no joint row, whose step score is NaN.
+fn steps_of(rows: &[&Line], joints: &[&Line]) -> Result<(Vec<PrequentialStep>, Option<f64>), String> {
     let num = |r: &Line, col: &str| -> Result<f64, String> {
         let v = r.get(col).map(String::as_str).unwrap_or("");
         match v {
             "" => Ok(f64::NAN),
-            v => v.parse::<f64>().map_err(|e| format!("scored.tsv: `{col}` = {v:?}: {e}")),
+            v => v.parse::<f64>().map_err(|e| format!("the score's `{col}` = {v:?}: {e}")),
         }
     };
     let mut ends: Vec<f64> = Vec::new();
@@ -1036,12 +1078,11 @@ fn steps_of(rows: &[&Line], joint: bool) -> Result<(Vec<PrequentialStep>, Option
     for t in ends {
         let at: Vec<&&Line> = rows.iter().filter(|r| num(r, "t_stop").is_ok_and(|x| x == t)).collect();
         let mut per_stream = Vec::new();
-        let mut joint_score = None;
+        let joint_score = match joints.iter().find(|r| num(r, "t_stop").is_ok_and(|x| x == t)) {
+            Some(r) => Some(num(r, "log_score")?),
+            None => None,
+        };
         for r in &at {
-            if r["stream"] == "joint" {
-                joint_score = Some(num(r, "log_score")?);
-                continue;
-            }
             let start = num(r, "t_start")?;
             per_stream.push(StreamScore {
                 stream: r["stream"].clone(),
@@ -1070,7 +1111,7 @@ fn steps_of(rows: &[&Line], joint: bool) -> Result<(Vec<PrequentialStep>, Option
             continue;
         }
         per_stream.sort_by(|a, b| a.stream.cmp(&b.stream));
-        let log_score = match (joint.then_some(joint_score).flatten(), per_stream.as_slice()) {
+        let log_score = match (joint_score, per_stream.as_slice()) {
             (Some(j), _) => j,
             (None, [one]) => one.log_score,
             (None, _) => {
@@ -1136,11 +1177,12 @@ mod tests {
         let rows = [
             stream_row("cases", "6", "7", "3", "-1.5"),
             stream_row("survey", "7", "7", "2", "-0.5"),
-            line(&[("stream", "joint"), ("t_stop", "7"), ("log_score", "-1.75")]),
             stream_row("cases", "7", "8", "4", "-2"),
         ];
+        let joints = [line(&[("t_stop", "7"), ("log_score", "-1.75")])];
         let refs: Vec<&Line> = rows.iter().collect();
-        let (steps, no_joint) = steps_of(&refs, true).unwrap();
+        let joint_refs: Vec<&Line> = joints.iter().collect();
+        let (steps, no_joint) = steps_of(&refs, &joint_refs).unwrap();
         assert_eq!(no_joint, None);
         assert_eq!(steps.len(), 2);
         assert_eq!((steps[0].t, steps[0].log_score), (7.0, -1.75), "the joint row's score");
@@ -1151,9 +1193,22 @@ mod tests {
         assert_eq!(steps[0].per_stream[1].coverage, Coverage::Instant);
         assert_eq!(cases.interval.q95, 5.0);
 
-        let (steps, no_joint) = steps_of(&refs, false).unwrap();
+        let (steps, no_joint) = steps_of(&refs, &[]).unwrap();
         assert_eq!(no_joint, Some(7.0), "free-forward reads no joint row");
         assert!(steps[0].log_score.is_nan());
+    }
+
+    /// A score whose `score.json` carries another schema tag, as one stored
+    /// in the single-file layout does, is refused rather than read.
+    #[test]
+    fn a_score_of_another_layout_is_refused() {
+        let current = serde_json::json!({ "schema": crate::score_command::SCORE_SCHEMA, "modes": {} });
+        assert!(parse_score_manifest(&serde_json::to_vec(&current).unwrap(), "s").is_ok());
+        let old = serde_json::json!({ "schema": "camdl.score/v1", "modes": {} });
+        let e = parse_score_manifest(&serde_json::to_vec(&old).unwrap(), "s").unwrap_err();
+        assert!(e.contains("tagged `camdl.score/v1`") && e.contains("score its prediction again"), "{e}");
+        let e = parse_score_manifest(b"{}", "s").unwrap_err();
+        assert!(e.contains("tagged `(none)`"), "{e}");
     }
 
     /// Replicates combine each step's score, and each stream's, by
@@ -1164,7 +1219,7 @@ mod tests {
         let rows = [stream_row("cases", "6", "7", "3", "")];
         let refs: Vec<&Line> = rows.iter().collect();
         let trace = |ls: f64, crps: f64| {
-            let (mut steps, _) = steps_of(&refs, true).unwrap();
+            let (mut steps, _) = steps_of(&refs, &[]).unwrap();
             steps[0].log_score = ls;
             steps[0].per_stream[0].log_score = ls;
             steps[0].per_stream[0].crps = crps;

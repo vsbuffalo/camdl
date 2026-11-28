@@ -312,7 +312,7 @@ fn path_names_every_kind_through_every_handle_form() {
     assert_eq!(p.path_of(&["@f", "draws"]), draws);
     let out = p.run(&["path", "@f", "draws"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains(&format!("@f → run {}", &run["run_id"].as_str().unwrap()[..6])));
-    for (label, name, m) in [("@cell", "traj", "build/sim.json"), ("@pf", "pf_health", "build/pf.json"), ("@pred", "report", "build/pred.json"), ("@sc", "summary", "build/score.json")] {
+    for (label, name, m) in [("@cell", "traj", "build/sim.json"), ("@pf", "pf_health", "build/pf.json"), ("@pred", "report", "build/pred.json"), ("@sc", "summary_rows", "build/score.json")] {
         let manifest = p.manifest(m);
         let holder = results(&manifest).iter().find(|r| r["files"].get(name).is_some()).unwrap();
         let want = folders[holder["run_id"].as_str().unwrap()].join(holder["files"][name]["file"].as_str().unwrap());

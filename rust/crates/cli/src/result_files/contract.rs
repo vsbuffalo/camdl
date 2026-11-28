@@ -180,7 +180,17 @@ pub(super) fn kinds() -> Vec<(&'static str, &'static str, Vec<Row>)> {
                 row(PredictionFile::Manifest { part: PredictionPart::Report, stem: "report".into() }, "always"),
             ],
         ),
-        ("score", "A stored prediction scored against its outcomes.", ScoreFile::ALL.into_iter().map(|f| row(f, "always")).collect()),
+        (
+            "score",
+            "A stored prediction scored against its outcomes.",
+            ScoreFile::DATA_ROWS
+                .into_iter()
+                .filter(|f| *f != ScoreFile::Score)
+                .map(|f| row(f, "a free-forward or one-step score"))
+                .chain(ScoreFile::TARGETS.into_iter().filter(|f| *f != ScoreFile::Score).map(|f| row(f, "a forecast score")))
+                .chain([row(ScoreFile::Score, "always")])
+                .collect(),
+        ),
         (
             "pfilter",
             "A particle filter run at one parameter point.",

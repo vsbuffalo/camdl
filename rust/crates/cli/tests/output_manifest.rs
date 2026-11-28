@@ -527,7 +527,7 @@ fn fit_predict_and_score_manifests() {
         "the model read, the outcome table the score stored, then the score"
     );
     let names: Vec<&str> = results(&m)[3]["files"].as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(names, ["score", "scored", "summary"]);
+    assert_eq!(names, ["joint_rows", "joint_summary_rows", "score", "scored_rows", "summary_rows"]);
 }
 
 /// The folder of the one result of `kind` under `store`.
@@ -564,7 +564,7 @@ fn a_compare_manifest_lists_its_predictions_and_scores() {
     let m = p.manifest("build/cmp.json");
     assert_eq!(kinds(&m), ["prediction", "score"].repeat(4), "two replicates of each input, each prediction before its score");
     let entries = results(&m);
-    assert!(entries[0]["files"]["predictive"].is_object() && entries[1]["files"]["scored"].is_object());
+    assert!(entries[0]["files"]["predictive"].is_object() && entries[1]["files"]["scored_rows"].is_object());
     assert_eq!(entries[1]["upstream"], serde_json::Value::Null, "a score is stored inside its prediction, not a by-product");
     let first = std::fs::read(p.path("build/cmp.json")).unwrap();
     p.ok(&compare);

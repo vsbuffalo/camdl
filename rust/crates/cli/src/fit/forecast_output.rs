@@ -688,7 +688,7 @@ pub(crate) fn run_forecast(out: &crate::out::Out, job: ForecastJob) -> Result<Fo
 /// trajectory across every target (D54), so each joint sums its log densities
 /// over the targets before the samples are averaged.
 fn scored_targets(arms: &[ArmForecast], values: &HeldOutValues, model: &ir::Model) -> crate::fit::scoring::Scored {
-    use crate::fit::scoring::{JointCell, ScoreMode, ScoredCell, Scored};
+    use crate::fit::scoring::{CellKind, JointCell, JointKind, ScoredCell, Scored};
     let mut scored = Scored::default();
     let fc0 = &arms[0].fc;
     for (k, t) in fc0.plan.targets().iter().enumerate() {
@@ -705,7 +705,7 @@ fn scored_targets(arms: &[ArmForecast], values: &HeldOutValues, model: &ir::Mode
     for arm in arms {
         let fc = &arm.fc;
         let n = fc.n_draws * fc.n_particles;
-        let joint = |ks: &[usize], start: f64, stop: f64, periods_ahead: Option<i64>, lead: Option<f64>| {
+        let joint = |ks: &[usize], start: f64, stop: f64, lead: Option<f64>| {
             let mut sum = vec![0.0_f64; n];
             for &k in ks {
                 if let Some(ll) = &fc.held_out_log_liks[k] {
@@ -715,10 +715,7 @@ fn scored_targets(arms: &[ArmForecast], values: &HeldOutValues, model: &ir::Mode
             JointCell {
                 scenario: arm.label.scenario.clone(),
                 sweep: arm.label.sweep.clone(),
-                mode: ScoreMode::Forecast,
-                origin: Some(origin),
-                periods_ahead,
-                lead,
+                kind: JointKind::Target { origin, lead },
                 start,
                 stop,
                 role: crate::fit::predict::RowRole::Future,
@@ -738,10 +735,7 @@ fn scored_targets(arms: &[ArmForecast], values: &HeldOutValues, model: &ir::Mode
                 stratum: stratum_of(o),
                 start: t.measures.start(),
                 stop: t.measures.end(),
-                mode: ScoreMode::Forecast,
-                origin: Some(origin),
-                periods_ahead: Some(t.periods_ahead),
-                lead: Some(t.lead),
+                kind: CellKind::Target { origin, periods_ahead: t.periods_ahead, lead: t.lead },
                 role: crate::fit::predict::RowRole::Future,
                 observed: y,
                 samples: fc.draws[k].clone(),
@@ -757,11 +751,11 @@ fn scored_targets(arms: &[ArmForecast], values: &HeldOutValues, model: &ir::Mode
             // counts within one stream and is left out of the joint.
             let lead = fc.plan.targets()[ks[0]].lead;
             let start = ks.iter().map(|&k| fc.plan.targets()[k].measures.start()).fold(f64::INFINITY, f64::min);
-            scored.joints.push(joint(ks, start, *end, None, Some(lead)));
+            scored.joints.push(joint(ks, start, *end, Some(lead)));
         }
         let all: Vec<usize> = by_end.iter().flat_map(|(_, ks)| ks.iter().copied()).collect();
         if let Some((last, _)) = by_end.last() {
-            scored.joints.push(joint(&all, origin, *last, None, None));
+            scored.joints.push(joint(&all, origin, *last, None));
         }
     }
     scored

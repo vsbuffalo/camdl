@@ -170,8 +170,8 @@ struct ScoreFacts {
     mode: String,
     /// `trained`, `held_out`, `future` or `unknown`.
     role: String,
-    /// A forecast's lead, as `scored.tsv` writes it; `None` outside a
-    /// forecast.
+    /// A forecast's lead, as `scored_targets.tsv` writes it; `None` outside
+    /// a forecast.
     lead: Option<String>,
     /// A forecast's reach as written (`--horizon`); `None` outside a
     /// forecast.
@@ -587,7 +587,7 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
             let [t] = tables.as_slice() else {
                 out.fail(format!(
                     "error: --pointwise writes the rows of one table, and this comparison has {} (one per lead); \
-                     compare one lead's scores, or read each score's scored.tsv", tables.len()));
+                     compare one lead's scores, or read each score's scored_targets.tsv", tables.len()));
             };
             match write_pointwise(&t.rows, t.base_idx, path) {
                 Ok(PointwiseWritten { joint: (jp, nj), streams: (sp, ns) }) => out.say(format_args!(

@@ -126,7 +126,7 @@ fn every_contract_version_is_pinned_to_its_files() {
         ("model_source", 1, "5e161da1b9744beb"),
         ("fit", 1, "25b195434f1880a2"),
         ("prediction", 2, "99cfdc3334a62eeb"),
-        ("score", 1, "ae160b79b23fb23c"),
+        ("score", 2, "1ddbae198ee2d516"),
         ("pfilter", 1, "c390dcc138c34252"),
         ("trace", 1, "55473bda7e3e6ee3"),
         ("pf_health", 1, "134c84fddede4fc6"),

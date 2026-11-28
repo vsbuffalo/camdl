@@ -336,7 +336,7 @@ fn links_are_written_for_every_kind_and_resolve_to_the_stored_files() {
     // The layout, spelled out for the cases the rule above derives.
     let r = p.path("results");
     for link in ["sims/cell/traj.tsv", "sims/cell/cases.tsv", "filters/pf/loglik.toml", "filters/pf/pf_health.tsv", "fits/f/draws.tsv",
-        "fits/f/chain_0/trace.tsv", "predictions/pred/report.json", "scores/sc/summary.tsv"]
+        "fits/f/chain_0/trace.tsv", "predictions/pred/report.json", "scores/sc/summary_rows.tsv"]
     {
         assert!(r.join(link).exists(), "{link}");
     }

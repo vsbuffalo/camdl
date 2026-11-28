@@ -37,12 +37,75 @@ pub(crate) enum ScoreMode {
 }
 
 impl ScoreMode {
-    /// The value of the `mode` column.
+    /// The mode's name, as `score.json` and `camdl predict --mode` spell it.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             ScoreMode::FreeForward => "free_forward",
             ScoreMode::OneStep => "one_step",
             ScoreMode::Forecast => "forecast",
+        }
+    }
+}
+
+/// Which of the two modes that predict the data's own rows predicted a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DataRowMode {
+    FreeForward,
+    OneStep,
+}
+
+impl DataRowMode {
+    /// The value of the `mode` column of `scored_rows.tsv`.
+    pub(crate) fn as_str(self) -> &'static str {
+        self.score_mode().as_str()
+    }
+
+    pub(crate) fn score_mode(self) -> ScoreMode {
+        match self {
+            DataRowMode::FreeForward => ScoreMode::FreeForward,
+            DataRowMode::OneStep => ScoreMode::OneStep,
+        }
+    }
+}
+
+/// What a scored row is a prediction of: a row of the data, or a target
+/// after a forecast origin. A score holds rows of one kind.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CellKind {
+    /// A data row, predicted free-forward or one step ahead.
+    DataRow { mode: DataRowMode },
+    /// A forecast target: the origin it is forecast from, how many of its
+    /// stream's periods ahead of the origin it is, from 1, and the time from
+    /// the origin to its end.
+    Target { origin: f64, periods_ahead: i64, lead: f64 },
+}
+
+impl CellKind {
+    pub(crate) fn mode(&self) -> ScoreMode {
+        match self {
+            CellKind::DataRow { mode } => mode.score_mode(),
+            CellKind::Target { .. } => ScoreMode::Forecast,
+        }
+    }
+}
+
+/// What a joint log score is of: every stream's row ending at one stop of a
+/// one-step prediction, or a forecast's targets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum JointKind {
+    /// The rows of every stream that end at one stop of the one-step filter.
+    DataRow,
+    /// The targets of a forecast from `origin`: those ending at one time,
+    /// which share the `lead`, or with `lead` `None` every target of the
+    /// forecast.
+    Target { origin: f64, lead: Option<f64> },
+}
+
+impl JointKind {
+    pub(crate) fn mode(&self) -> ScoreMode {
+        match self {
+            JointKind::DataRow => ScoreMode::OneStep,
+            JointKind::Target { .. } => ScoreMode::Forecast,
         }
     }
 }
@@ -84,15 +147,7 @@ pub(crate) struct ScoredCell {
     /// `start == stop`.
     pub start: f64,
     pub stop: f64,
-    pub mode: ScoreMode,
-    /// The forecast origin; `None` outside a forecast.
-    pub origin: Option<f64>,
-    /// How many of its stream's periods ahead of the forecast origin the
-    /// target is, from 1; `None` outside a forecast.
-    pub periods_ahead: Option<i64>,
-    /// A forecast target's time from the origin to its end, or a one-step
-    /// row's period; `None` for a free-forward row.
-    pub lead: Option<f64>,
+    pub kind: CellKind,
     pub role: RowRole,
     pub observed: f64,
     /// The predictive samples drawn at the row from the states that reached
@@ -113,10 +168,7 @@ pub(crate) struct ScoredCell {
 pub(crate) struct JointCell {
     pub scenario: String,
     pub sweep: Vec<(String, f64)>,
-    pub mode: ScoreMode,
-    pub origin: Option<f64>,
-    pub periods_ahead: Option<i64>,
-    pub lead: Option<f64>,
+    pub kind: JointKind,
     pub start: f64,
     pub stop: f64,
     pub role: RowRole,
@@ -233,10 +285,7 @@ mod tests {
             stratum: Vec::new(),
             start: 0.0,
             stop: 7.0,
-            mode: ScoreMode::Forecast,
-            origin: Some(0.0),
-            periods_ahead: Some(1),
-            lead: Some(7.0),
+            kind: CellKind::Target { origin: 0.0, periods_ahead: 1, lead: 7.0 },
             role: RowRole::Future,
             observed: y,
             samples,

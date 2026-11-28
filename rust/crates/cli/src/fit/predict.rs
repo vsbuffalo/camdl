@@ -4610,7 +4610,7 @@ fn free_forward_scored(
     scenario: &str,
     sweep: &[(String, f64)],
 ) -> Vec<crate::fit::scoring::ScoredCell> {
-    use crate::fit::scoring::{ScoreMode, ScoredCell};
+    use crate::fit::scoring::{CellKind, DataRowMode, ScoredCell};
     let mut cells = Vec::new();
     for (si, o) in model.observations.iter().enumerate() {
         for (ti, cell) in outcomes.observed[si].iter().enumerate() {
@@ -4634,10 +4634,7 @@ fn free_forward_scored(
                 stratum: o.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect(),
                 start,
                 stop,
-                mode: ScoreMode::FreeForward,
-                origin: None,
-                periods_ahead: None,
-                lead: None,
+                kind: CellKind::DataRow { mode: DataRowMode::FreeForward },
                 role,
                 observed: *y,
                 samples: accum.samples[si][ti].clone(),
@@ -5928,7 +5925,7 @@ fn one_step_scored(
     records: &[Option<DrawRecord>],
     training_rows: &TrainingRows,
 ) -> Result<crate::fit::scoring::Scored, String> {
-    use crate::fit::scoring::{JointCell, ScoreMode, ScoredCell, Scored};
+    use crate::fit::scoring::{CellKind, DataRowMode, JointCell, JointKind, ScoredCell, Scored};
     let kept: Vec<&DrawRecord> = records.iter().flatten().collect();
     let mut scored = Scored::default();
     let contribution = draw_contribution;
@@ -5963,10 +5960,6 @@ fn one_step_scored(
             if fewer {
                 fewer_rows += 1;
             }
-            let lead = match row.measures {
-                crate::fit::observed_rows::Measures::Period(p) => Some(p.stop() - p.start()),
-                crate::fit::observed_rows::Measures::Instant(t) => position.checked_sub(1).map(|p| t - rows[p].measures.end()),
-            };
             at_stop[ti].push(scored.cells.len());
             scored.cells.push(ScoredCell {
                 scenario: String::new(),
@@ -5976,10 +5969,7 @@ fn one_step_scored(
                 stratum: leaf.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect(),
                 start: row.measures.start(),
                 stop: end,
-                mode: ScoreMode::OneStep,
-                origin: None,
-                periods_ahead: None,
-                lead,
+                kind: CellKind::DataRow { mode: DataRowMode::OneStep },
                 role: training_rows.role(name, position),
                 observed: y,
                 samples,
@@ -6006,15 +5996,10 @@ fn one_step_scored(
             ));
             continue;
         }
-        let lead = scored.cells[first].lead;
-        let leads_agree = cells.iter().all(|&c| scored.cells[c].lead == lead);
         scored.joints.push(JointCell {
             scenario: String::new(),
             sweep: Vec::new(),
-            mode: ScoreMode::OneStep,
-            origin: None,
-            periods_ahead: None,
-            lead: if leads_agree { lead } else { None },
+            kind: JointKind::DataRow,
             start: cells.iter().map(|&c| scored.cells[c].start).fold(f64::INFINITY, f64::min),
             stop: obs_times[ti],
             role,

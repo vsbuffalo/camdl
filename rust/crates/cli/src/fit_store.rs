@@ -477,7 +477,7 @@ pub(crate) struct ScoreSettings {
 /// prediction scored with two sets of outcomes is one prediction with two
 /// scores.
 #[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "score", version = 1)]
+#[identity(tag = "score", version = 2)]
 pub(crate) struct ScoreIdentity {
     /// The prediction scored; its identity holds the parameter source, the
     /// mode, the reach and everything the prediction read.

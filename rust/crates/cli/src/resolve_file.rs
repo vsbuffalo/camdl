@@ -684,7 +684,7 @@ pub(crate) fn resolve_each(store: &Store, source: &Source, narrow: &Narrow, name
 pub(crate) fn default_file(store: &Store, source: &Source, narrow: &Narrow) -> Result<ResolvedFile, FileRefusal> {
     let c = resolve_result(store, source, narrow)?;
     let result_names = c.result_names();
-    let named = match default_stored(c.located.kind()).and_then(|d| result_names.iter().find(|n| n.stored == d)) {
+    let named = match default_stored(c.located.kind()).iter().find_map(|d| result_names.iter().find(|n| n.stored == *d)) {
         Some(n) => n.clone(),
         None => match &result_names[..] {
             [one] => one.clone(),
@@ -701,21 +701,22 @@ pub(crate) fn every_file(store: &Store, source: &Source, narrow: &Narrow) -> Res
     c.result_names().iter().map(|n| file_of(store, source, &c, n)).collect()
 }
 
-/// The stored name of the file `camdl cat` prints for a result of `kind`
-/// given no name.
-fn default_stored(kind: &str) -> Option<&'static str> {
+/// The stored names of the file `camdl cat` prints for a result of `kind`
+/// given no name, the first a result holds: a score holds the summary of
+/// one of its two layouts.
+fn default_stored(kind: &str) -> &'static [&'static str] {
     use store::Artifact;
     use crate::{fit_store as fs, pfilter_store as ps, profile_store as pr, sim_store as ss};
-    Some(match kind {
-        k if k == ss::Sim::KIND => ss::TRAJ_FILE,
-        k if k == ps::Pfilter::KIND => ps::LOGLIK_FILE,
-        k if k == fs::FitRun::KIND => "fit_state.toml",
-        k if k == fs::FitProblem::KIND => fs::PROBLEM_FILE,
-        k if k == fs::Prediction::KIND => "report.json",
-        k if k == fs::Score::KIND => "summary.tsv",
-        k if k == pr::ProfilePoint::KIND => pr::MLE_FILE,
-        _ => return None,
-    })
+    match kind {
+        k if k == ss::Sim::KIND => &[ss::TRAJ_FILE],
+        k if k == ps::Pfilter::KIND => &[ps::LOGLIK_FILE],
+        k if k == fs::FitRun::KIND => &["fit_state.toml"],
+        k if k == fs::FitProblem::KIND => &[fs::PROBLEM_FILE],
+        k if k == fs::Prediction::KIND => &["report.json"],
+        k if k == fs::Score::KIND => &["summary_rows.tsv", "summary_targets.tsv"],
+        k if k == pr::ProfilePoint::KIND => &[pr::MLE_FILE],
+        _ => &[],
+    }
 }
 
 /// `name` among `cands`, by the rules of the module documentation: the

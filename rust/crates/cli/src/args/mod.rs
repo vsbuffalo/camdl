@@ -2008,9 +2008,13 @@ pub struct PredictInvocation {
 /// against the observed outcomes of the rows it predicted.
 #[derive(Args, Clone, Default, store::Inputs)]
 #[command(after_help = "\
-A score is stored inside the prediction it scores, at scores/score-<id>/:
-scored.tsv (one row per scored row or target), summary.tsv (one row per
-stream, mode, role and lead) and score.json. Everything about the prediction
+A score is stored inside the prediction it scores, at scores/score-<id>/.
+A free-forward or one-step score writes scored_rows.tsv (one row per scored
+data row), summary_rows.tsv (one row per stream, mode and role),
+joint_rows.tsv (every stream's row ending at one time, scored together) and
+joint_summary_rows.tsv; a forecast score writes scored_targets.tsv,
+summary_targets.tsv (one row per stream, role and lead), joint_targets.tsv
+and joint_summary_targets.tsv. Both write score.json. Everything about the prediction
 (its parameter source, mode, reach, particles, seed and scenarios) is in its
 identity, so `score` takes no flag for it. The outcome files must hold every
 row the prediction conditioned on, unchanged.

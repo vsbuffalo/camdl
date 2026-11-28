@@ -1986,11 +1986,26 @@ suffix when chains were excluded. Contract version 2.
 
 #### `score`
 
-A stored prediction scored against its outcomes. Contract version 1.
+A stored prediction scored against its outcomes. Contract version 2.
 
-- `scored`: `scored.tsv`, TSV (always). One row per scored row or target.
-- `summary`: `summary.tsv`, TSV (always). One row per stream, mode, role and
-  lead.
+- `scored_rows`: `scored_rows.tsv`, TSV (a free-forward or one-step score). One
+  row per scored data row.
+- `summary_rows`: `summary_rows.tsv`, TSV (a free-forward or one-step score).
+  One row per stream, mode and role.
+- `joint_rows`: `joint_rows.tsv`, TSV (a free-forward or one-step score). One
+  row per stop of a one-step prediction: every stream's row ending there, scored
+  together.
+- `joint_summary_rows`: `joint_summary_rows.tsv`, TSV (a free-forward or
+  one-step score). One row per role of the joint rows.
+- `scored_targets`: `scored_targets.tsv`, TSV (a forecast score). One row per
+  scored forecast target.
+- `summary_targets`: `summary_targets.tsv`, TSV (a forecast score). One row per
+  stream, role and lead.
+- `joint_targets`: `joint_targets.tsv`, TSV (a forecast score). One row per
+  target end time, every stream's target ending then scored together, and one
+  row for every target together.
+- `joint_summary_targets`: `joint_summary_targets.tsv`, TSV (a forecast score).
+  One row per role and lead of the joint targets.
 - `score`: `score.json`, JSON (always). The parameter source, the basis, the
   conditioning and the notes.
 

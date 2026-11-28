@@ -61,13 +61,11 @@ fn the_one_step_score_sums_to_the_pfilter_log_likelihood() {
     );
     ok(&score_in(cwd.path(), &root, &["@os", "--data", "daily_cases=daily_cases.tsv"]), "score");
     let folder = the_score(&root);
-    let rows = tsv_rows(&read(&folder, "scored.tsv"));
-    let sum = |stream: &str| -> (usize, f64) {
-        let r: Vec<&BTreeMap<String, String>> = rows.iter().filter(|r| r["stream"] == stream).collect();
-        (r.len(), r.iter().map(|r| r["log_score"].parse::<f64>().unwrap()).sum())
+    let sum = |rows: Vec<BTreeMap<String, String>>| -> (usize, f64) {
+        (rows.len(), rows.iter().map(|r| r["log_score"].parse::<f64>().unwrap()).sum())
     };
-    let (n, per_stream) = sum("daily_cases");
-    let (n_joint, joint) = sum("joint");
+    let (n, per_stream) = sum(tsv_rows(&read(&folder, "scored_rows.tsv")));
+    let (n_joint, joint) = sum(tsv_rows(&read(&folder, "joint_rows.tsv")));
     assert_eq!((n, n_joint), (63, 63), "every row of the one stream, and one joint row per row");
 
     let seed = draw_zero_seed(7).to_string();
@@ -109,7 +107,7 @@ fn the_ode_score_is_the_observation_density_at_the_trajectory() {
     let folder = the_score(&root);
     let manifest: serde_json::Value = serde_json::from_str(&read(&folder, "score.json")).unwrap();
     assert_eq!(manifest["modes"]["free_forward"]["basis"], serde_json::json!({"ode_free_forward": {"samples_per_draw": 1}}));
-    let rows = tsv_rows(&read(&folder, "scored.tsv"));
+    let rows = tsv_rows(&read(&folder, "scored_rows.tsv"));
 
     let sim = predict_in(cwd.path(), &root, &["simulate", "model.camdl", "--params", "point.toml", "--backend", "ode", "-o", "traj.tsv"]);
     ok(&sim, "simulate");
@@ -174,7 +172,7 @@ fn a_held_out_outcome_changes_the_score_and_never_the_prediction() {
     // The rows before the edited one score identically: the pass that
     // predicts them has assimilated nothing of it.
     let by_time = |folder: &Path| -> BTreeMap<String, String> {
-        tsv_rows(&read(folder, "scored.tsv"))
+        tsv_rows(&read(folder, "scored_rows.tsv"))
             .into_iter()
             .filter(|r| r["stream"] == "daily_cases")
             .map(|r| (r["t_stop"].clone(), r["log_score"].clone()))
@@ -227,8 +225,10 @@ fn an_outcome_file_that_disagrees_with_the_prediction_is_refused() {
 /// Every mode each backend has, from both parameter sources, is scored: the
 /// score computes the prediction again with its outcomes bound, and writes a
 /// score only when the run id and every file it computes equal the stored
-/// prediction's byte for byte. `summary.tsv` then has one row per (stream,
-/// mode, role, lead), each the count of `scored.tsv` rows with that key.
+/// prediction's byte for byte. A free-forward or one-step score's
+/// `summary_rows.tsv` then has one row per (stream, mode, role), and a
+/// forecast's `summary_targets.tsv` one per (stream, role, lead), each the
+/// count of the scored rows with that key.
 #[test]
 fn the_score_recomputes_every_prediction_and_pools_nothing() {
     let fresh = tempfile::tempdir().unwrap();
@@ -253,10 +253,15 @@ fn the_score_recomputes_every_prediction_and_pools_nothing() {
     let found = scores(&root);
     assert_eq!(found.len(), lines.len(), "{found:#?}");
     for (folder, _) in &found {
-        let rows = tsv_rows(&read(folder, "scored.tsv"));
-        let summary = tsv_rows(&read(folder, "summary.tsv"));
+        let forecast = folder.to_string_lossy().contains("/forecast-");
+        let (rows_file, summary_file, by) = match forecast {
+            true => ("scored_targets.tsv", "summary_targets.tsv", "lead"),
+            false => ("scored_rows.tsv", "summary_rows.tsv", "mode"),
+        };
+        let rows = tsv_rows(&read(folder, rows_file));
+        let summary = tsv_rows(&read(folder, summary_file));
         assert!(!rows.is_empty() && !summary.is_empty(), "{}", folder.display());
-        let key = |r: &BTreeMap<String, String>| (r["scenario"].clone(), r["stream"].clone(), r["mode"].clone(), r["role"].clone(), r["lead"].clone());
+        let key = |r: &BTreeMap<String, String>| (r["scenario"].clone(), r["stream"].clone(), r["role"].clone(), r[by].clone());
         let mut counted: BTreeMap<_, usize> = BTreeMap::new();
         for r in &rows {
             *counted.entry(key(r)).or_default() += 1;
@@ -267,13 +272,13 @@ fn the_score_recomputes_every_prediction_and_pools_nothing() {
         for s in &summary {
             assert_eq!(s["n"].parse::<usize>().unwrap(), counted[&key(s)], "{s:?}");
         }
-        assert_eq!(counted.len(), summary.len(), "every key of scored.tsv is summarized");
+        assert_eq!(counted.len(), summary.len(), "every key of the scored rows is summarized");
     }
     // The posterior's scores keep its trained and held-out rows apart, and
     // a forecast's targets apart by lead.
-    let all = tsv_rows(&read(&found.iter().find(|(p, _)| p.to_string_lossy().contains("/predict/all-")).unwrap().0, "summary.tsv"));
+    let all = tsv_rows(&read(&found.iter().find(|(p, _)| p.to_string_lossy().contains("/predict/all-")).unwrap().0, "summary_rows.tsv"));
     assert!(all.iter().any(|r| r["role"] == "trained") && all.iter().any(|r| r["role"] == "held_out"), "{all:?}");
-    let fc = tsv_rows(&read(&found.iter().find(|(p, _)| p.to_string_lossy().contains("/predict/forecast-")).unwrap().0, "summary.tsv"));
+    let fc = tsv_rows(&read(&found.iter().find(|(p, _)| p.to_string_lossy().contains("/predict/forecast-")).unwrap().0, "summary_targets.tsv"));
     let leads: std::collections::BTreeSet<&str> = fc.iter().filter(|r| r["stream"] == "daily_cases").map(|r| r["lead"].as_str()).collect();
     assert!(leads.len() > 1, "one summary row per lead: {fc:?}");
 }
@@ -293,7 +298,7 @@ fn a_fixed_points_held_out_rows_are_labelled_as_declared() {
     let manifest: serde_json::Value = serde_json::from_str(&read(&folder, "score.json")).unwrap();
     assert_eq!(manifest["conditioning"], serde_json::json!({"hold_out_declared": {"trained_through": 20.0}}), "{manifest:#}");
     assert!(manifest["labels"].as_array().unwrap().contains(&serde_json::json!("held out as declared, not verified")), "{manifest:#}");
-    let rows = tsv_rows(&read(&folder, "scored.tsv"));
+    let rows = tsv_rows(&read(&folder, "scored_rows.tsv"));
     let role_at = |t: f64| rows.iter().find(|r| r["stream"] == "daily_cases" && r["t_stop"].parse::<f64>().unwrap() == t).unwrap()["role"].clone();
     assert_eq!(role_at(20.0), "trained");
     assert_eq!(role_at(21.0), "held_out");
@@ -306,7 +311,7 @@ fn a_fixed_points_held_out_rows_are_labelled_as_declared() {
     let folder = the_score(&root);
     let manifest: serde_json::Value = serde_json::from_str(&read(&folder, "score.json")).unwrap();
     assert_eq!(manifest["conditioning"], serde_json::json!("unknown"), "{manifest:#}");
-    assert!(tsv_rows(&read(&folder, "scored.tsv")).iter().all(|r| r["role"] == "unknown"));
+    assert!(tsv_rows(&read(&folder, "scored_rows.tsv")).iter().all(|r| r["role"] == "unknown"));
 }
 
 /// A forecast read under `--covariate pop=realised` is labelled conditional
@@ -348,10 +353,10 @@ fn show_and_cat_read_a_score() {
     let show = camdl(cwd.path(), &root, &["show".into(), "@sc".into()], &[]);
     let text = String::from_utf8_lossy(&show.stdout);
     assert!(show.status.success(), "{}", String::from_utf8_lossy(&show.stderr));
-    assert!(text.contains("score") && text.contains("summary.tsv"), "{text}");
+    assert!(text.contains("score") && text.contains("summary_rows.tsv"), "{text}");
     let cat = camdl(cwd.path(), &root, &["cat".into(), folder.to_string_lossy().into_owned()], &[]);
     assert!(cat.status.success(), "{}", String::from_utf8_lossy(&cat.stderr));
-    assert_eq!(String::from_utf8_lossy(&cat.stdout), read(&folder, "summary.tsv"));
+    assert_eq!(String::from_utf8_lossy(&cat.stdout), read(&folder, "summary_rows.tsv"));
 }
 
 /// Two observation blocks that read one data source through `from surv`.
@@ -395,7 +400,8 @@ simulate { from = 0 'days  to = 63 'days }
 "#;
 
 /// Two blocks that read one source are two streams: each keeps its own name
-/// in `scored.tsv`, beside the source, and its own rows in `summary.tsv`. A
+/// in `scored_rows.tsv`, beside the source, and its own rows in
+/// `summary_rows.tsv`. A
 /// fixed point bound through the blocks of a shared source is scored.
 #[test]
 fn two_streams_reading_one_source_are_scored_apart() {
@@ -415,13 +421,13 @@ fn two_streams_reading_one_source_are_scored_apart() {
     );
     ok(&score_in(cwd.path(), &root, &["@shared", "--data", "surv=surv.tsv"]), "score");
     let folder = the_score(&root);
-    let rows = tsv_rows(&read(&folder, "scored.tsv"));
+    let rows = tsv_rows(&read(&folder, "scored_rows.tsv"));
     for stream in ["weekly", "recovered"] {
         let mine: Vec<_> = rows.iter().filter(|r| r["stream"] == stream).collect();
         assert_eq!(mine.len(), 8, "{stream}: {rows:?}");
         assert!(mine.iter().all(|r| r["source"] == "surv"));
     }
-    let summary = tsv_rows(&read(&folder, "summary.tsv"));
+    let summary = tsv_rows(&read(&folder, "summary_rows.tsv"));
     for stream in ["weekly", "recovered"] {
         for (role, n) in [("trained", "4"), ("held_out", "4")] {
             let r: Vec<_> = summary.iter().filter(|r| r["stream"] == stream && r["role"] == role).collect();
@@ -460,7 +466,7 @@ fn a_fit_with_no_holdout_is_labelled_held_out_past_its_data() {
     let mut seen = Vec::new();
     for (folder, _) in &found {
         let m: serde_json::Value = serde_json::from_str(&read(folder, "score.json")).unwrap();
-        let roles: Vec<String> = tsv_rows(&read(folder, "scored.tsv")).into_iter().map(|r| r["role"].clone()).collect();
+        let roles: Vec<String> = tsv_rows(&read(folder, "scored_rows.tsv")).into_iter().map(|r| r["role"].clone()).collect();
         seen.push((m["conditioning"].clone(), roles.iter().any(|r| r == "held_out")));
     }
     assert!(seen.contains(&(serde_json::json!("in_sample"), false)), "{seen:?}");
@@ -483,7 +489,7 @@ fn the_onward_pass_ties_with_the_pfilter_on_the_whole_file() {
         "predict",
     );
     ok(&score_in(cwd.path(), &root, &["@held", "--data", "daily_cases=daily_cases.tsv"]), "score");
-    let rows = tsv_rows(&read(&the_score(&root), "scored.tsv"));
+    let rows = tsv_rows(&read(&the_score(&root), "scored_rows.tsv"));
     let rows: Vec<_> = rows.iter().filter(|r| r["stream"] == "daily_cases").collect();
     assert_eq!(rows.len(), 63);
     assert!(rows.iter().any(|r| r["role"] == "held_out"));
@@ -629,4 +635,143 @@ fn an_outcome_row_before_the_last_conditioning_row_is_refused() {
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(err.contains("not in chronological order"), "{err}");
     assert!(scores(&root).is_empty());
+}
+
+/// The fixture model with `daily_cases` replaced by a stream of calendar
+/// months, each row's period given by its window columns, run to day 120,
+/// and its data file: four months of 31, 28, 31 and 30 days.
+fn monthly(cwd: &Path) {
+    let model = std::fs::read_to_string(cwd.join("model.camdl")).unwrap();
+    let monthly = model
+        .replace(
+            "  daily_cases {\n    columns       { time : time, daily_cases : count }\n    covers        = closing_at(time, 1 'days)\n    projected     = incidence(infection)\n    emit_schedule = every 1 'days\n",
+            "  daily_cases {\n    columns       { start : window_start, stop : window_stop, daily_cases : count }\n    projected     = incidence(infection)\n",
+        )
+        .replace("to = 63 'days", "to = 120 'days");
+    assert!(monthly.contains("window_start") && monthly.contains("to = 120 'days"), "the fixture's daily stream moved");
+    std::fs::write(cwd.join("monthly.camdl"), monthly).unwrap();
+    std::fs::write(cwd.join("months.tsv"), "start\tstop\tdaily_cases\n0\t31\t385\n31\t59\t6\n59\t90\t0\n90\t120\t0\n").unwrap();
+}
+
+/// A one-step score of a stream of calendar months has one summary row per
+/// role: the rows' periods of 28 to 31 days do not split the stream's
+/// summary.
+#[test]
+fn a_one_step_score_of_a_monthly_stream_has_one_summary_row_per_role() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    monthly(cwd.path());
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "monthly.camdl", "--params", "point.toml", "--data", "daily_cases=months.tsv", "--mode",
+            "one_step", "--n-draws", "2", "--particles", "100", "--holdout-after", "59", "--label", "months",
+        ]),
+        "predict",
+    );
+    ok(&score_in(cwd.path(), &root, &["@months", "--data", "daily_cases=months.tsv"]), "score");
+    let summary = tsv_rows(&read(&the_score(&root), "summary_rows.tsv"));
+    let mine: Vec<_> = summary.iter().filter(|r| r["stream"] == "daily_cases").collect();
+    let roles: Vec<(&str, &str)> = mine.iter().map(|r| (r["role"].as_str(), r["n"].as_str())).collect();
+    assert_eq!(roles, [("trained", "2"), ("held_out", "2")], "one summary row per role: {summary:?}");
+}
+
+/// The header row of a score's file `file`.
+fn header_of(folder: &Path, file: &str) -> Vec<String> {
+    read(folder, file).lines().next().unwrap_or_default().split('\t').map(str::to_string).collect()
+}
+
+/// A one-step score of the daily and the weekly stream at a fixed point, the
+/// rows after day 24 held out: its folder.
+fn two_stream_one_step(root: &Path, cwd: &Path) -> PathBuf {
+    let data = ["--data", "daily_cases=daily_cases.tsv", "--data", "weekly_cases=weekly_cases.tsv"];
+    ok(
+        &predict_in(cwd, root, &[
+            &["predict", "model.camdl", "--params", "point.toml"][..], &data,
+            &["--mode", "one_step", "--n-draws", "2", "--particles", "40", "--holdout-after", "24", "--label", "two"],
+        ]
+        .concat()),
+        "predict",
+    );
+    ok(&score_in(cwd, root, &[&["@two"][..], &data].concat()), "score");
+    the_score(root)
+}
+
+/// The joint rows of a one-step score are in files of their own: no
+/// per-stream file holds one, and the joint summary's held-out
+/// `log_score_sum` is the sum of the held-out joint rows' log scores, the
+/// one-step score of every held-out row together.
+#[test]
+fn a_one_step_scores_joint_rows_are_in_their_own_files() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let folder = two_stream_one_step(&root, cwd.path());
+    for file in ["scored_rows.tsv", "summary_rows.tsv"] {
+        let rows = tsv_rows(&read(&folder, file));
+        assert!(!rows.is_empty(), "{file}");
+        assert!(rows.iter().all(|r| r["stream"] == "daily_cases" || r["stream"] == "weekly_cases"), "{file}: {rows:?}");
+        assert!(!header_of(&folder, file).contains(&"streams".to_string()), "{file}");
+    }
+    let joints = tsv_rows(&read(&folder, "joint_rows.tsv"));
+    let held: Vec<f64> = joints.iter().filter(|r| r["role"] == "held_out").map(|r| r["log_score"].parse().unwrap()).collect();
+    assert!(!held.is_empty(), "{joints:?}");
+    assert!(
+        joints.iter().any(|r| r["streams"] == "daily_cases,weekly_cases"),
+        "a stop where both streams end scores them together: {joints:?}"
+    );
+    let summary = tsv_rows(&read(&folder, "joint_summary_rows.tsv"));
+    let row: Vec<_> = summary.iter().filter(|r| r["role"] == "held_out").collect();
+    assert_eq!(row.len(), 1, "{summary:?}");
+    assert_eq!(row[0]["n"], held.len().to_string());
+    let sum: f64 = row[0]["log_score_sum"].parse().unwrap();
+    let want: f64 = held.iter().sum();
+    assert!((sum - want).abs() <= 1e-9 * want.abs().max(1.0), "joint summary {sum} vs the joint rows' sum {want}");
+}
+
+/// The two layouts share their first columns through `in_90`. A forecast
+/// score's files carry `origin`, `periods_ahead` and `lead` and no `mode`;
+/// a data-row score's carry `mode` and none of the three.
+#[test]
+fn the_two_layouts_share_a_core_and_carry_their_own_columns() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let rows = two_stream_one_step(&root, cwd.path());
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--horizon",
+            "10 days", "--n-draws", "2", "--particles", "20", "--holdout-after", "24", "--label", "fc",
+        ]),
+        "predict",
+    );
+    ok(&score_in(cwd.path(), &root, &["@fc", "--data", "daily_cases=daily_cases.tsv"]), "score");
+    let targets = scores(&root).into_iter().map(|(p, _)| p).find(|p| *p != rows).unwrap();
+    let has = |folder: &Path, file: &str, col: &str| header_of(folder, file).iter().any(|c| c == col);
+    for file in ["scored_rows.tsv", "summary_rows.tsv", "joint_rows.tsv", "joint_summary_rows.tsv"] {
+        for col in ["origin", "periods_ahead", "lead"] {
+            assert!(!has(&rows, file, col), "{file} has no {col}");
+        }
+        assert!(!rows.join(file.replace("rows", "targets")).exists(), "a data-row score writes no target file");
+    }
+    for file in ["scored_rows.tsv", "summary_rows.tsv"] {
+        assert!(has(&rows, file, "mode"), "{file} has a mode");
+    }
+    for file in ["scored_targets.tsv", "summary_targets.tsv", "joint_targets.tsv", "joint_summary_targets.tsv"] {
+        assert!(!has(&targets, file, "mode"), "{file} has no mode");
+        assert!(has(&targets, file, "lead"), "{file} has a lead");
+        assert!(!targets.join(file.replace("targets", "rows")).exists(), "a forecast score writes no data-row file");
+    }
+    for col in ["origin", "periods_ahead"] {
+        assert!(has(&targets, "scored_targets.tsv", col), "scored_targets.tsv has {col}");
+    }
+    let core = |folder: &Path, file: &str| -> Vec<String> {
+        let h = header_of(folder, file);
+        let end = h.iter().position(|c| c == "in_90").expect("the core ends at in_90") + 1;
+        h[..end].to_vec()
+    };
+    assert_eq!(core(&rows, "scored_rows.tsv"), core(&targets, "scored_targets.tsv"), "one shared core");
+    let manifest: serde_json::Value = serde_json::from_str(&read(&targets, "score.json")).unwrap();
+    assert_eq!(manifest["schema"], "camdl.score/v2");
+    assert!(manifest["modes"]["forecast"].is_object(), "score.json records the mode: {manifest:#}");
 }

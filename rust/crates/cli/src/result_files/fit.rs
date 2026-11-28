@@ -368,38 +368,80 @@ impl ParseFile for PredictionFile {
     }
 }
 
-/// The files of a score (`score`).
+/// The files of a score (`score`). A score of a free-forward or one-step
+/// prediction holds the data-row files and `score.json`; a score of a
+/// forecast holds the target files and `score.json`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScoreFile {
-    /// `scored.tsv`, one row per scored row or target.
-    Scored,
-    /// `summary.tsv`, one row per stream, mode, role and lead.
-    Summary,
+    /// `scored_rows.tsv`, one row per scored data row.
+    ScoredRows,
+    /// `summary_rows.tsv`, one row per stream, mode and role.
+    SummaryRows,
+    /// `joint_rows.tsv`, one row per stop of a one-step prediction: every
+    /// stream's row ending there, scored together.
+    JointRows,
+    /// `joint_summary_rows.tsv`, one row per role of `joint_rows.tsv`.
+    JointSummaryRows,
+    /// `scored_targets.tsv`, one row per scored forecast target.
+    ScoredTargets,
+    /// `summary_targets.tsv`, one row per stream, role and lead.
+    SummaryTargets,
+    /// `joint_targets.tsv`, one row per target end time, and one for every
+    /// target of the forecast together.
+    JointTargets,
+    /// `joint_summary_targets.tsv`, one row per role and lead of
+    /// `joint_targets.tsv`.
+    JointSummaryTargets,
     /// `score.json`: the parameter source, the basis, the conditioning and
     /// the notes.
     Score,
 }
 
 impl ScoreFile {
-    pub(crate) const ALL: [ScoreFile; 3] = [ScoreFile::Scored, ScoreFile::Summary, ScoreFile::Score];
+    pub(crate) const ALL: [ScoreFile; 9] = [
+        ScoreFile::ScoredRows,
+        ScoreFile::SummaryRows,
+        ScoreFile::JointRows,
+        ScoreFile::JointSummaryRows,
+        ScoreFile::ScoredTargets,
+        ScoreFile::SummaryTargets,
+        ScoreFile::JointTargets,
+        ScoreFile::JointSummaryTargets,
+        ScoreFile::Score,
+    ];
+    /// The files of a score of a free-forward or one-step prediction.
+    pub(crate) const DATA_ROWS: [ScoreFile; 5] =
+        [ScoreFile::ScoredRows, ScoreFile::SummaryRows, ScoreFile::JointRows, ScoreFile::JointSummaryRows, ScoreFile::Score];
+    /// The files of a score of a forecast.
+    pub(crate) const TARGETS: [ScoreFile; 5] = [
+        ScoreFile::ScoredTargets,
+        ScoreFile::SummaryTargets,
+        ScoreFile::JointTargets,
+        ScoreFile::JointSummaryTargets,
+        ScoreFile::Score,
+    ];
 }
 
 impl ResultFile for ScoreFile {
     fn logical(&self) -> String {
         match self {
-            ScoreFile::Scored => "scored",
-            ScoreFile::Summary => "summary",
+            ScoreFile::ScoredRows => "scored_rows",
+            ScoreFile::SummaryRows => "summary_rows",
+            ScoreFile::JointRows => "joint_rows",
+            ScoreFile::JointSummaryRows => "joint_summary_rows",
+            ScoreFile::ScoredTargets => "scored_targets",
+            ScoreFile::SummaryTargets => "summary_targets",
+            ScoreFile::JointTargets => "joint_targets",
+            ScoreFile::JointSummaryTargets => "joint_summary_targets",
             ScoreFile::Score => "score",
         }
         .into()
     }
     fn stored(&self) -> String {
         match self {
-            ScoreFile::Scored => "scored.tsv",
-            ScoreFile::Summary => "summary.tsv",
-            ScoreFile::Score => "score.json",
+            ScoreFile::Score => "score.json".into(),
+            other => format!("{}.tsv", other.logical()),
         }
-        .into()
     }
     fn format(&self) -> Format {
         match self {
@@ -409,8 +451,14 @@ impl ResultFile for ScoreFile {
     }
     fn about(&self) -> &'static str {
         match self {
-            ScoreFile::Scored => "One row per scored row or target.",
-            ScoreFile::Summary => "One row per stream, mode, role and lead.",
+            ScoreFile::ScoredRows => "One row per scored data row.",
+            ScoreFile::SummaryRows => "One row per stream, mode and role.",
+            ScoreFile::JointRows => "One row per stop of a one-step prediction: every stream's row ending there, scored together.",
+            ScoreFile::JointSummaryRows => "One row per role of the joint rows.",
+            ScoreFile::ScoredTargets => "One row per scored forecast target.",
+            ScoreFile::SummaryTargets => "One row per stream, role and lead.",
+            ScoreFile::JointTargets => "One row per target end time, every stream's target ending then scored together, and one row for every target together.",
+            ScoreFile::JointSummaryTargets => "One row per role and lead of the joint targets.",
             ScoreFile::Score => "The parameter source, the basis, the conditioning and the notes.",
         }
     }
@@ -418,7 +466,7 @@ impl ResultFile for ScoreFile {
 
 impl Files for Score {
     type File = ScoreFile;
-    const CONTRACT: u16 = 1;
+    const CONTRACT: u16 = 2;
 }
 
 impl ParseFile for ScoreFile {

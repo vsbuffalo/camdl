@@ -18,21 +18,29 @@
 //! stored one: its run id equal, and every file it writes equal byte for byte.
 //! A difference is refused as an internal error before any score is written.
 //! The scored rows are then reduced by the rules of [`crate::fit::scoring`]
-//! into `scored.tsv`, `summary.tsv` and `score.json`.
+//! into the files of one of two layouts, which share their first columns:
+//! for a free-forward or one-step prediction, which predicts the data's own
+//! rows, `scored_rows.tsv`, `summary_rows.tsv`, `joint_rows.tsv` and
+//! `joint_summary_rows.tsv`; for a forecast, which predicts targets after its
+//! origin, `scored_targets.tsv`, `summary_targets.tsv`, `joint_targets.tsv`
+//! and `joint_summary_targets.tsv`. Either is written with `score.json`
+//! ([`ScoreFile`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::fit::observed_rows::ObservedRow;
 use crate::fit::predict::RowRole;
-use crate::fit::scoring::{OutcomeBinding, RowScore, ScoreMode, ScoreRules, Scored};
+use crate::fit::scoring::{CellKind, DataRowMode, JointKind, OutcomeBinding, RowScore, ScoreMode, ScoreRules, Scored};
+use crate::result_files::fit::ScoreFile;
+use crate::result_files::ResultFile;
 use crate::quantile::{fmt_time, fmt_value};
 
 /// The central interval levels a score reports the coverage of.
 const INTERVALS: (f64, f64) = (0.5, 0.9);
 
 /// The `schema` tag of `score.json`.
-const SCORE_SCHEMA: &str = "camdl.score/v1";
+pub(crate) const SCORE_SCHEMA: &str = "camdl.score/v2";
 
 /// `camdl score PREDICTION`.
 pub(crate) fn cmd_score(inv: crate::args::ScoreInvocation) {
@@ -183,7 +191,8 @@ pub(crate) fn score_prediction(
         outcomes,
         settings: ScoreSettings { intervals: (finite(INTERVALS.0)?, finite(INTERVALS.1)?), pit_seed },
     };
-    let run = match crate::camdl_store::begin::<Score>(store, &identity, &(), info, request.reuse(), crate::result_files::fit::ScoreFile::ALL).map_err(|e| e.to_string())? {
+    let files = if is_forecast(&settings) { ScoreFile::TARGETS } else { ScoreFile::DATA_ROWS };
+    let run = match crate::camdl_store::begin::<Score>(store, &identity, &(), info, request.reuse(), files).map_err(|e| e.to_string())? {
         store::Begin::Reused(stored) => {
             out.say(format_args!("score: reused the stored score {}", stored.folder().display()));
             return Ok(stored);
@@ -210,12 +219,9 @@ pub(crate) fn score_prediction(
     let last_scored_end = recomputed.scored.cells.iter().map(|c| c.stop).fold(f64::NEG_INFINITY, f64::max);
     let labels = Labels::of(prediction, &settings, partition, last_scored_end, recomputed.scored.plug_in);
     let rendered = render(&recomputed.scored, &rules, &labels, &calendar, &recomputed.forcings_held)?;
-    for (name, bytes) in [
-        ("scored.tsv", rendered.scored.into_bytes()),
-        ("summary.tsv", rendered.summary.into_bytes()),
-        ("score.json", rendered.manifest.into_bytes()),
-    ] {
-        run.result_file(name).and_then(|h| h.write_all(&bytes)).map_err(|e| format!("{name}: {e}"))?;
+    for (file, text) in rendered.files {
+        let name = file.stored();
+        run.result_file(&name).and_then(|h| h.write_all(text.as_bytes())).map_err(|e| format!("{name}: {e}"))?;
     }
     let stored = run.finish().map_err(|e| e.to_string())?;
     out.say(format_args!("score: {} row(s) scored, stored at {}", rendered.n_rows, stored.folder().display()));
@@ -682,43 +688,73 @@ fn partition_of(bytes: &[u8], expected: &str) -> Result<TrainingPartition, Strin
     Ok(TrainingPartition { held_out: kind != "all", train_end })
 }
 
-/// The three files of a score.
+/// A score's files, rendered, each with its contents.
 struct Rendered {
-    scored: String,
-    summary: String,
-    manifest: String,
+    files: Vec<(ScoreFile, String)>,
     n_rows: usize,
 }
 
-/// One row of `scored.tsv`, before it is formatted.
-struct Line<'a> {
+/// The columns every scored row has.
+struct CoreLine<'a> {
     scenario: &'a str,
     sweep: &'a [(String, f64)],
-    /// The observation block the row is of, or `joint`.
+    /// The observation block the row is of.
     stream: String,
-    /// The data source the block reads; empty for a `joint` row.
+    /// The data source the block reads.
     source: String,
     stratum: &'a [(String, String)],
     start: f64,
     stop: f64,
-    mode: ScoreMode,
-    origin: Option<f64>,
-    periods_ahead: Option<i64>,
-    lead: Option<f64>,
     role: RowRole,
     observed: Option<f64>,
     log_score: f64,
     /// The sample rules, when some draw's state reached the row alive.
     rules: Option<RowScore>,
-    /// No draw reached the row: it is counted in `summary.tsv`'s
-    /// `n_unscored` and written to no other file.
+    /// No draw reached the row: it is counted in its summary's `n_unscored`
+    /// and written to no other file.
     unscored: bool,
 }
 
-/// The key a summary row aggregates over: never pooled across scenario,
-/// sweep point, stream (an observation block, with its source), stratum,
-/// mode, role or lead. Two blocks reading one source are two streams.
-type SummaryKey = (String, String, String, String, &'static str, &'static str, String);
+/// One stored score's rows: a score holds one kind.
+enum ScoredLines<'a> {
+    DataRows(Vec<DataRowLine<'a>>),
+    Targets(Vec<TargetLine<'a>>),
+}
+
+/// A scored row of the data, predicted free-forward or one step ahead.
+struct DataRowLine<'a> {
+    core: CoreLine<'a>,
+    mode: DataRowMode,
+}
+
+/// A scored forecast target.
+struct TargetLine<'a> {
+    core: CoreLine<'a>,
+    origin: f64,
+    periods_ahead: i64,
+    lead: f64,
+}
+
+/// One joint row: the log score of several streams' rows or targets
+/// together.
+struct JointLine<'a> {
+    scenario: &'a str,
+    sweep: &'a [(String, f64)],
+    start: f64,
+    stop: f64,
+    role: RowRole,
+    /// The streams scored together, in the order the prediction lists them.
+    streams: &'a [String],
+    kind: JointKind,
+    log_score: f64,
+    unscored: bool,
+}
+
+/// What a score's rows are predictions of, read off the prediction's mode:
+/// forecast targets for a forecast, data rows otherwise.
+fn is_forecast(settings: &serde_json::Value) -> bool {
+    settings["mode"].as_str() == Some("forecast")
+}
 
 #[derive(Default)]
 struct Sums {
@@ -732,163 +768,147 @@ struct Sums {
     inside: (usize, usize),
 }
 
-fn render(
-    scored: &Scored,
-    rules: &ScoreRules,
-    labels: &Labels,
-    calendar: &ir::caltime::CalendarAxis,
-    forcings_held: &[score::trace::PrequentialWarning],
-) -> Result<Rendered, String> {
-    use sim::inference::prequential::PIT_RNG_STREAM;
-    let mut pit_rng = sim::rng::StatefulRng::new_stream(rules.pit_seed, PIT_RNG_STREAM);
-    let mut lines: Vec<Line> = Vec::new();
-    for c in &scored.cells {
-        // One uniform per row, scored or not, so a row's PIT draw does not
-        // depend on whether another row was reached.
-        let v = pit_rng.uniform();
-        let (log_score, s) = match (c.log_liks.is_empty(), c.samples.is_empty()) {
-            (true, _) => (f64::NAN, None),
-            (false, true) => (crate::fit::scoring::log_mean_exp(&c.log_liks)?, None),
-            (false, false) => {
-                let s = crate::fit::scoring::score_cell(c, rules, v)?;
-                (s.log_score, Some(s))
-            }
-        };
-        lines.push(Line {
-            scenario: &c.scenario,
-            sweep: &c.sweep,
-            stream: c.leaf.clone(),
-            source: c.source.clone(),
-            stratum: &c.stratum,
-            start: c.start,
-            stop: c.stop,
-            mode: c.mode,
-            origin: c.origin,
-            periods_ahead: c.periods_ahead,
-            lead: c.lead,
-            role: c.role,
-            observed: Some(c.observed),
-            log_score,
-            rules: s,
-            unscored: c.log_liks.is_empty(),
-        });
-    }
-    for j in &scored.joints {
-        let log_score = match j.log_liks.is_empty() {
-            true => f64::NAN,
-            false => crate::fit::scoring::log_mean_exp(&j.log_liks)
-                .map_err(|e| format!("the joint log score at t = {}: {e}", fmt_time(j.stop)))?,
-        };
-        lines.push(Line {
-            scenario: &j.scenario,
-            sweep: &j.sweep,
-            stream: "joint".to_string(),
-            source: String::new(),
-            stratum: &[],
-            start: j.start,
-            stop: j.stop,
-            mode: j.mode,
-            origin: j.origin,
-            periods_ahead: j.periods_ahead,
-            lead: j.lead,
-            role: j.role,
-            observed: None,
-            log_score,
-            rules: None,
-            unscored: j.log_liks.is_empty(),
-        });
-    }
-    // Every dimension any row is stratified by, in order of first appearance.
-    let mut dims: Vec<String> = Vec::new();
-    let mut sweep_names: Vec<String> = Vec::new();
-    for l in &lines {
-        for (d, _) in l.stratum {
-            if !dims.contains(d) {
-                dims.push(d.clone());
-            }
+impl Sums {
+    fn add(&mut self, log_score: f64, rules: Option<&RowScore>, unscored: bool) {
+        if unscored {
+            self.n_unscored += 1;
+            return;
         }
-        for (p, _) in l.sweep {
-            if !sweep_names.contains(p) {
-                sweep_names.push(p.clone());
-            }
+        self.n += 1;
+        self.log_score += log_score;
+        if let Some(r) = rules {
+            self.n_rules += 1;
+            self.crps += r.crps;
+            self.wis += r.wis.wis;
+            self.inside.0 += usize::from(r.inside.0);
+            self.inside.1 += usize::from(r.inside.1);
         }
     }
-    let dated = calendar.origin.is_some();
-    let date = |t: f64| calendar.date_of(t).map(ir::caltime::RenderedInstant::into_string).unwrap_or_default();
-    let opt_time = |t: Option<f64>| t.map(fmt_time).unwrap_or_default();
-    let num = |x: f64| if x.is_finite() || x == f64::NEG_INFINITY { format!("{x}") } else { String::new() };
-    let observed_cell = |l: &Line| l.observed.map(fmt_value).unwrap_or_default();
-    let cells_of = |l: &Line| -> (String, Vec<String>, String) {
-        let sweep: Vec<String> = sweep_names
-            .iter()
-            .map(|p| l.sweep.iter().find(|(q, _)| q == p).map(|(_, v)| fmt_value(*v)).unwrap_or_default())
-            .collect();
-        let strata: Vec<String> =
-            dims.iter().map(|d| l.stratum.iter().find(|(e, _)| e == d).map(|(_, v)| v.clone()).unwrap_or_default()).collect();
-        let named = [l.stream.clone(), l.source.clone()];
-        (l.scenario.to_string(), sweep.into_iter().chain(named).chain(strata).collect(), opt_time(l.lead))
-    };
 
-    let mut header: Vec<String> = vec!["scenario".into()];
-    header.extend(sweep_names.iter().map(|p| format!("sweep:{p}")));
-    header.extend(["stream", "source"].map(String::from));
-    header.extend(dims.iter().cloned());
-    header.extend(["t_start", "t_stop"].map(String::from));
-    if dated {
-        header.extend(["date_start", "date_stop"].map(String::from));
+    /// `n`, `n_unscored`, `log_score_sum` and `log_score_mean`.
+    fn log_score_cells(&self) -> [String; 4] {
+        let some = |x: f64| if self.n > 0 { num(x) } else { String::new() };
+        [self.n.to_string(), self.n_unscored.to_string(), some(self.log_score), some(self.log_score / self.n as f64)]
     }
-    header.extend(
-        [
-            "mode", "origin", "periods_ahead", "lead", "role", "parameters", "quantity", "mean", "q05", "q25", "q50", "q75", "q95",
-            "observed", "log_score", "crps", "wis", "wis_dispersion", "wis_over", "wis_under", "pit", "in_50", "in_90",
-        ]
-        .map(String::from),
-    );
-    let mut scored_tsv = header.join("\t") + "\n";
-    let mut order: Vec<SummaryKey> = Vec::new();
-    let mut sums: BTreeMap<SummaryKey, Sums> = BTreeMap::new();
-    for l in &lines {
-        let (scenario, middle, lead) = cells_of(l);
-        let key: SummaryKey = (
-            scenario.clone(),
-            middle[..sweep_names.len()].join("\t"),
-            middle[sweep_names.len()..sweep_names.len() + 2].join("\t"),
-            middle[sweep_names.len() + 2..].join("\t"),
-            l.mode.as_str(),
-            l.role.as_str(),
-            lead.clone(),
+
+    /// `crps_mean`, `wis_mean`, `coverage_50` and `coverage_90`.
+    fn rule_cells(&self) -> [String; 4] {
+        if self.n_rules == 0 {
+            return Default::default();
+        }
+        let k = self.n_rules as f64;
+        [num(self.crps / k), num(self.wis / k), num(self.inside.0 as f64 / k), num(self.inside.1 as f64 / k)]
+    }
+}
+
+/// Summary sums by key, in the order each key first appears.
+#[derive(Default)]
+struct Grouped {
+    order: Vec<Vec<String>>,
+    sums: BTreeMap<Vec<String>, Sums>,
+}
+
+impl Grouped {
+    fn entry(&mut self, key: Vec<String>) -> &mut Sums {
+        if !self.sums.contains_key(&key) {
+            self.order.push(key.clone());
+        }
+        self.sums.entry(key).or_default()
+    }
+}
+
+/// A number as a score file writes it: empty when it is NaN or +∞.
+fn num(x: f64) -> String {
+    if x.is_finite() || x == f64::NEG_INFINITY { format!("{x}") } else { String::new() }
+}
+
+/// What the rows of one score share in how they are written: the sweep
+/// parameters and stratum dimensions any row has, and the calendar.
+struct Columns<'a> {
+    sweep_names: Vec<String>,
+    dims: Vec<String>,
+    calendar: &'a ir::caltime::CalendarAxis,
+}
+
+impl Columns<'_> {
+    fn dated(&self) -> bool {
+        self.calendar.origin.is_some()
+    }
+
+    fn date(&self, t: f64) -> String {
+        self.calendar.date_of(t).map(ir::caltime::RenderedInstant::into_string).unwrap_or_default()
+    }
+
+    /// `scenario` and the `sweep:<p>` columns.
+    fn arm_header(&self) -> Vec<String> {
+        std::iter::once("scenario".to_string()).chain(self.sweep_names.iter().map(|p| format!("sweep:{p}"))).collect()
+    }
+
+    fn arm_cells(&self, scenario: &str, sweep: &[(String, f64)]) -> Vec<String> {
+        std::iter::once(scenario.to_string())
+            .chain(
+                self.sweep_names
+                    .iter()
+                    .map(|p| sweep.iter().find(|(q, _)| q == p).map(|(_, v)| fmt_value(*v)).unwrap_or_default()),
+            )
+            .collect()
+    }
+
+    /// The arm, then `stream`, `source` and the dimensions: the part of a
+    /// row's summary key every kind shares.
+    fn stream_header(&self) -> Vec<String> {
+        let mut h = self.arm_header();
+        h.extend(["stream", "source"].map(String::from));
+        h.extend(self.dims.iter().cloned());
+        h
+    }
+
+    fn stream_cells(&self, l: &CoreLine) -> Vec<String> {
+        let mut row = self.arm_cells(l.scenario, l.sweep);
+        row.extend([l.stream.clone(), l.source.clone()]);
+        row.extend(
+            self.dims.iter().map(|d| l.stratum.iter().find(|(e, _)| e == d).map(|(_, v)| v.clone()).unwrap_or_default()),
         );
-        if !sums.contains_key(&key) {
-            order.push(key.clone());
+        row
+    }
+
+    /// `t_start`, `t_stop` and, in a dated model, `date_start` and
+    /// `date_stop`.
+    fn period_header(&self) -> Vec<String> {
+        let mut h: Vec<String> = ["t_start", "t_stop"].map(String::from).to_vec();
+        if self.dated() {
+            h.extend(["date_start", "date_stop"].map(String::from));
         }
-        let s = sums.entry(key).or_default();
-        if l.unscored {
-            s.n_unscored += 1;
-            continue;
+        h
+    }
+
+    fn period_cells(&self, start: f64, stop: f64) -> Vec<String> {
+        let mut row = vec![fmt_time(start), fmt_time(stop)];
+        if self.dated() {
+            row.extend([self.date(start), self.date(stop)]);
         }
-        s.n += 1;
-        s.log_score += l.log_score;
-        if let Some(r) = &l.rules {
-            s.n_rules += 1;
-            s.crps += r.crps;
-            s.wis += r.wis.wis;
-            s.inside.0 += usize::from(r.inside.0);
-            s.inside.1 += usize::from(r.inside.1);
-        }
-        let mut row: Vec<String> = vec![scenario.clone()];
-        row.extend(middle.iter().cloned());
-        row.push(fmt_time(l.start));
-        row.push(fmt_time(l.stop));
-        if dated {
-            row.push(date(l.start));
-            row.push(date(l.stop));
-        }
-        row.push(l.mode.as_str().into());
-        row.push(opt_time(l.origin));
-        row.push(l.periods_ahead.map(|h| h.to_string()).unwrap_or_default());
-        row.push(lead.clone());
+        row
+    }
+
+    /// The shared core of `scored_rows.tsv` and `scored_targets.tsv`.
+    fn core_header(&self) -> Vec<String> {
+        let mut h = self.stream_header();
+        h.extend(self.period_header());
+        h.extend(
+            [
+                "role", "parameters", "quantity", "mean", "q05", "q25", "q50", "q75", "q95", "observed", "log_score", "crps", "wis",
+                "wis_dispersion", "wis_over", "wis_under", "pit", "in_50", "in_90",
+            ]
+            .map(String::from),
+        );
+        h
+    }
+
+    fn core_cells(&self, l: &CoreLine, parameters: &str) -> Vec<String> {
+        let mut row = self.stream_cells(l);
+        row.extend(self.period_cells(l.start, l.stop));
         row.push(l.role.as_str().into());
-        row.push(labels.parameters.into());
+        row.push(parameters.into());
         match &l.rules {
             Some(s) => {
                 row.push(crate::quantile::Quantity::Observation.as_str().into());
@@ -907,51 +927,245 @@ fn render(
             }
             None => {
                 row.extend(vec![String::new(); 7]);
-                row.push(observed_cell(l));
+                row.push(l.observed.map(fmt_value).unwrap_or_default());
                 row.push(num(l.log_score));
                 row.extend(vec![String::new(); 8]);
             }
         }
-        scored_tsv += &(row.join("\t") + "\n");
+        row
     }
+}
 
-    let mut summary_header: Vec<String> = vec!["scenario".into()];
-    summary_header.extend(sweep_names.iter().map(|p| format!("sweep:{p}")));
-    summary_header.extend(["stream", "source"].map(String::from));
-    summary_header.extend(dims.iter().cloned());
-    summary_header.extend(
-        [
-            "mode", "role", "lead", "n", "n_unscored", "log_score_sum", "log_score_mean", "crps_mean", "wis_mean",
-            "coverage_50", "coverage_90",
-        ]
-            .map(String::from),
-    );
-    let mut summary = summary_header.join("\t") + "\n";
-    for key in &order {
-        let s = &sums[key];
-        let n = s.n as f64;
-        let mut row: Vec<String> = vec![key.0.clone()];
-        if !sweep_names.is_empty() {
-            row.push(key.1.clone());
-        }
-        row.push(key.2.clone());
-        if !dims.is_empty() {
-            row.push(key.3.clone());
-        }
-        let mean = |x: f64| if s.n > 0 { num(x / n) } else { String::new() };
-        row.extend([key.4.to_string(), key.5.to_string(), key.6.clone(), s.n.to_string(), s.n_unscored.to_string()]);
-        row.extend([if s.n > 0 { num(s.log_score) } else { String::new() }, mean(s.log_score)]);
-        if s.n_rules > 0 {
-            let k = s.n_rules as f64;
-            row.extend([num(s.crps / k), num(s.wis / k), num(s.inside.0 as f64 / k), num(s.inside.1 as f64 / k)]);
-        } else {
-            row.extend(vec![String::new(); 4]);
-        }
-        summary += &(row.join("\t") + "\n");
+fn tsv(header: &[String], rows: &[Vec<String>]) -> String {
+    let mut out = header.join("\t") + "\n";
+    for r in rows {
+        out += &(r.join("\t") + "\n");
     }
+    out
+}
 
-    let manifest = manifest(scored, labels, rules, &lines, forcings_held)?;
-    Ok(Rendered { scored: scored_tsv, summary, manifest, n_rows: scored.cells.len() })
+/// The rows of `scored` as the lines of a score of one kind, `forecast`
+/// choosing which, and its joint lines. A row or joint of the other kind is
+/// an internal error.
+fn lines_of<'a>(scored: &'a Scored, rules: &ScoreRules, forecast: bool) -> Result<(ScoredLines<'a>, Vec<JointLine<'a>>), String> {
+    use sim::inference::prequential::PIT_RNG_STREAM;
+    let mut pit_rng = sim::rng::StatefulRng::new_stream(rules.pit_seed, PIT_RNG_STREAM);
+    let mut lines = if forecast { ScoredLines::Targets(Vec::new()) } else { ScoredLines::DataRows(Vec::new()) };
+    for c in &scored.cells {
+        // One uniform per row, scored or not, so a row's PIT draw does not
+        // depend on whether another row was reached.
+        let v = pit_rng.uniform();
+        let (log_score, s) = match (c.log_liks.is_empty(), c.samples.is_empty()) {
+            (true, _) => (f64::NAN, None),
+            (false, true) => (crate::fit::scoring::log_mean_exp(&c.log_liks)?, None),
+            (false, false) => {
+                let s = crate::fit::scoring::score_cell(c, rules, v)?;
+                (s.log_score, Some(s))
+            }
+        };
+        let core = CoreLine {
+            scenario: &c.scenario,
+            sweep: &c.sweep,
+            stream: c.leaf.clone(),
+            source: c.source.clone(),
+            stratum: &c.stratum,
+            start: c.start,
+            stop: c.stop,
+            role: c.role,
+            observed: Some(c.observed),
+            log_score,
+            rules: s,
+            unscored: c.log_liks.is_empty(),
+        };
+        match (&mut lines, c.kind) {
+            (ScoredLines::DataRows(v), CellKind::DataRow { mode }) => v.push(DataRowLine { core, mode }),
+            (ScoredLines::Targets(v), CellKind::Target { origin, periods_ahead, lead }) => {
+                v.push(TargetLine { core, origin, periods_ahead, lead })
+            }
+            (_, kind) => {
+                return Err(format!(
+                    "internal error: a {} row of '{}' in the score of a {} prediction",
+                    kind.mode().as_str(),
+                    c.leaf,
+                    if forecast { "forecast" } else { "free-forward or one-step" }
+                ))
+            }
+        }
+    }
+    let mut joints = Vec::with_capacity(scored.joints.len());
+    for j in &scored.joints {
+        if matches!(j.kind, JointKind::Target { .. }) != forecast {
+            return Err(format!("internal error: a {} joint row in the score of another kind", j.kind.mode().as_str()));
+        }
+        let log_score = match j.log_liks.is_empty() {
+            true => f64::NAN,
+            false => crate::fit::scoring::log_mean_exp(&j.log_liks)
+                .map_err(|e| format!("the joint log score at t = {}: {e}", fmt_time(j.stop)))?,
+        };
+        joints.push(JointLine {
+            scenario: &j.scenario,
+            sweep: &j.sweep,
+            start: j.start,
+            stop: j.stop,
+            role: j.role,
+            streams: &j.streams,
+            kind: j.kind,
+            log_score,
+            unscored: j.log_liks.is_empty(),
+        });
+    }
+    Ok((lines, joints))
+}
+
+fn render(
+    scored: &Scored,
+    rules: &ScoreRules,
+    labels: &Labels,
+    calendar: &ir::caltime::CalendarAxis,
+    forcings_held: &[score::trace::PrequentialWarning],
+) -> Result<Rendered, String> {
+    let forecast = is_forecast(&labels.settings);
+    let (lines, joints) = lines_of(scored, rules, forecast)?;
+    let cores: Vec<&CoreLine> = match &lines {
+        ScoredLines::DataRows(v) => v.iter().map(|l| &l.core).collect(),
+        ScoredLines::Targets(v) => v.iter().map(|l| &l.core).collect(),
+    };
+    // Every dimension any row is stratified by, and every swept parameter, in
+    // order of first appearance.
+    let mut dims: Vec<String> = Vec::new();
+    let mut sweep_names: Vec<String> = Vec::new();
+    for l in &cores {
+        for (d, _) in l.stratum {
+            if !dims.contains(d) {
+                dims.push(d.clone());
+            }
+        }
+    }
+    for sweep in cores.iter().map(|l| l.sweep).chain(joints.iter().map(|j| j.sweep)) {
+        for (p, _) in sweep {
+            if !sweep_names.contains(p) {
+                sweep_names.push(p.clone());
+            }
+        }
+    }
+    let cols = Columns { sweep_names, dims, calendar };
+    let score_header = ["n", "n_unscored", "log_score_sum", "log_score_mean", "crps_mean", "wis_mean", "coverage_50", "coverage_90"];
+    let joint_score_header = ["n", "n_unscored", "log_score_sum", "log_score_mean"];
+    let mut scored_rows: Vec<Vec<String>> = Vec::new();
+    let mut groups = Grouped::default();
+    let mut joint_rows: Vec<Vec<String>> = Vec::new();
+    let mut joint_groups = Grouped::default();
+    let (files, summary_key): ([ScoreFile; 4], [&str; 2]) = match &lines {
+        ScoredLines::DataRows(v) => {
+            for l in v {
+                let mut key = cols.stream_cells(&l.core);
+                key.extend([l.mode.as_str().to_string(), l.core.role.as_str().to_string()]);
+                groups.entry(key).add(l.core.log_score, l.core.rules.as_ref(), l.core.unscored);
+                if l.core.unscored {
+                    continue;
+                }
+                let mut row = cols.core_cells(&l.core, labels.parameters);
+                row.push(l.mode.as_str().into());
+                scored_rows.push(row);
+            }
+            for j in &joints {
+                let mut key = cols.arm_cells(j.scenario, j.sweep);
+                key.push(j.role.as_str().into());
+                joint_groups.entry(key).add(j.log_score, None, j.unscored);
+                if j.unscored {
+                    continue;
+                }
+                let mut row = cols.arm_cells(j.scenario, j.sweep);
+                row.extend(cols.period_cells(j.start, j.stop));
+                row.extend([j.role.as_str().to_string(), j.streams.join(","), num(j.log_score)]);
+                joint_rows.push(row);
+            }
+            (
+                [ScoreFile::ScoredRows, ScoreFile::SummaryRows, ScoreFile::JointRows, ScoreFile::JointSummaryRows],
+                ["mode", "role"],
+            )
+        }
+        ScoredLines::Targets(v) => {
+            for l in v {
+                let mut key = cols.stream_cells(&l.core);
+                key.extend([l.core.role.as_str().to_string(), fmt_time(l.lead)]);
+                groups.entry(key).add(l.core.log_score, l.core.rules.as_ref(), l.core.unscored);
+                if l.core.unscored {
+                    continue;
+                }
+                let mut row = cols.core_cells(&l.core, labels.parameters);
+                row.extend([fmt_time(l.origin), l.periods_ahead.to_string(), fmt_time(l.lead)]);
+                scored_rows.push(row);
+            }
+            for j in &joints {
+                let JointKind::Target { origin, lead } = j.kind else { unreachable!("checked by lines_of") };
+                let lead = lead.map(fmt_time).unwrap_or_default();
+                let mut key = cols.arm_cells(j.scenario, j.sweep);
+                key.extend([j.role.as_str().to_string(), lead.clone()]);
+                joint_groups.entry(key).add(j.log_score, None, j.unscored);
+                if j.unscored {
+                    continue;
+                }
+                let mut row = cols.arm_cells(j.scenario, j.sweep);
+                row.extend(cols.period_cells(j.start, j.stop));
+                row.extend([j.role.as_str().to_string(), j.streams.join(","), fmt_time(origin), lead, num(j.log_score)]);
+                joint_rows.push(row);
+            }
+            (
+                [ScoreFile::ScoredTargets, ScoreFile::SummaryTargets, ScoreFile::JointTargets, ScoreFile::JointSummaryTargets],
+                ["role", "lead"],
+            )
+        }
+    };
+    let mut scored_header = cols.core_header();
+    let mut joint_header = cols.arm_header();
+    joint_header.extend(cols.period_header());
+    joint_header.extend(["role", "streams"].map(String::from));
+    match &lines {
+        ScoredLines::DataRows(_) => {
+            scored_header.push("mode".into());
+        }
+        ScoredLines::Targets(_) => {
+            scored_header.extend(["origin", "periods_ahead", "lead"].map(String::from));
+            joint_header.extend(["origin", "lead"].map(String::from));
+        }
+    }
+    joint_header.push("log_score".into());
+    let mut summary_header = cols.stream_header();
+    summary_header.extend(summary_key.map(String::from));
+    summary_header.extend(score_header.map(String::from));
+    let summary_rows: Vec<Vec<String>> = groups
+        .order
+        .iter()
+        .map(|key| {
+            let s = &groups.sums[key];
+            key.iter().cloned().chain(s.log_score_cells()).chain(s.rule_cells()).collect()
+        })
+        .collect();
+    let mut joint_summary_header = cols.arm_header();
+    joint_summary_header.push("role".into());
+    if forecast {
+        joint_summary_header.push("lead".into());
+    }
+    joint_summary_header.extend(joint_score_header.map(String::from));
+    let joint_summary_rows: Vec<Vec<String>> = joint_groups
+        .order
+        .iter()
+        .map(|key| key.iter().cloned().chain(joint_groups.sums[key].log_score_cells()).collect())
+        .collect();
+
+    let held_out = cores.iter().any(|l| l.role == RowRole::HeldOut);
+    let manifest = manifest(scored, labels, rules, held_out, forcings_held)?;
+    Ok(Rendered {
+        files: vec![
+            (files[0], tsv(&scored_header, &scored_rows)),
+            (files[1], tsv(&summary_header, &summary_rows)),
+            (files[2], tsv(&joint_header, &joint_rows)),
+            (files[3], tsv(&joint_summary_header, &joint_summary_rows)),
+            (ScoreFile::Score, manifest),
+        ],
+        n_rows: scored.cells.len(),
+    })
 }
 
 /// `score.json`: the parameter source, each mode's basis, the conditioning,
@@ -961,7 +1175,7 @@ fn manifest(
     scored: &Scored,
     labels: &Labels,
     rules: &ScoreRules,
-    lines: &[Line],
+    held_out: bool,
     forcings_held: &[score::trace::PrequentialWarning],
 ) -> Result<String, String> {
     let s = &labels.settings;
@@ -969,23 +1183,24 @@ fn manifest(
     let posterior = labels.parameters == "posterior";
     let mut modes: BTreeMap<&'static str, serde_json::Value> = BTreeMap::new();
     for c in &scored.cells {
-        if modes.contains_key(c.mode.as_str()) {
+        let mode = c.kind.mode();
+        if modes.contains_key(mode.as_str()) {
             continue;
         }
-        let per_draw = match c.mode {
+        let per_draw = match mode {
             ScoreMode::FreeForward => 1,
             ScoreMode::OneStep | ScoreMode::Forecast => particles.unwrap_or(1).max(1),
         };
         let n_draws = c.samples.len() / per_draw;
         let provenance = if posterior { score::trace::Provenance::Posterior { n_draws } } else { score::trace::Provenance::PlugIn };
-        let basis = match c.mode {
+        let basis = match mode {
             ScoreMode::OneStep | ScoreMode::Forecast => score::trace::PredictiveBasis::Filtered,
             ScoreMode::FreeForward if scored.ode => {
                 score::trace::PredictiveBasis::OdeFreeForward { samples_per_draw: 1 }
             }
             ScoreMode::FreeForward => score::trace::PredictiveBasis::SimulatedFreeForward,
         };
-        modes.insert(c.mode.as_str(), serde_json::json!({
+        modes.insert(mode.as_str(), serde_json::json!({
             "provenance": provenance,
             "basis": basis,
             "n_draws": n_draws,
@@ -996,7 +1211,7 @@ fn manifest(
     // each row's stream, period and observed value.
     let mut digests: BTreeMap<(String, &'static str), (usize, String)> = BTreeMap::new();
     for c in &scored.cells {
-        let e = digests.entry((c.leaf.clone(), c.mode.as_str())).or_insert((0, String::new()));
+        let e = digests.entry((c.leaf.clone(), c.kind.mode().as_str())).or_insert((0, String::new()));
         e.0 += 1;
         e.1 += &format!("{}\t{:016x}\t{:016x}\t{:016x}\t{}\n", c.leaf, c.start.to_bits(), c.stop.to_bits(), c.observed.to_bits(), c.scenario);
     }
@@ -1014,19 +1229,19 @@ fn manifest(
             single.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", ")
         ));
     }
-    // Per mode, each set of streams a `joint` row's density is of.
+    // Per mode, each set of streams a joint row's density is of.
     let mut joint_streams: BTreeMap<&'static str, std::collections::BTreeSet<Vec<String>>> = BTreeMap::new();
     for j in &scored.joints {
         let mut set = j.streams.clone();
         set.sort();
         set.dedup();
-        joint_streams.entry(j.mode.as_str()).or_default().insert(set);
+        joint_streams.entry(j.kind.mode().as_str()).or_default().insert(set);
     }
     let mut labels_out: Vec<&str> = Vec::new();
     if labels.realised() {
         labels_out.push("conditional on covariates observed after the origin");
     }
-    if matches!(labels.conditioning, score::trace::Conditioning::HoldOutDeclared { .. }) && lines.iter().any(|l| l.role == RowRole::HeldOut) {
+    if matches!(labels.conditioning, score::trace::Conditioning::HoldOutDeclared { .. }) && held_out {
         labels_out.push("held out as declared, not verified");
     }
     let mut doc = serde_json::json!({

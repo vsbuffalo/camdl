@@ -145,12 +145,12 @@ fn an_ode_free_forward_score_is_predicted_once_and_is_its_stored_sum() {
     let scores = fit_store_support::folders_of(&store_for(root), "score");
     assert_eq!(scores.len(), 2, "one score per fit: {scores:?}");
     let mut sums: Vec<f64> = scores.iter().map(|s| {
-        let text = std::fs::read_to_string(s.join("scored.tsv")).unwrap();
+        let text = std::fs::read_to_string(s.join("scored_rows.tsv")).unwrap();
         let mut lines = text.lines();
         let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
         let col = |n: &str| header.iter().position(|h| *h == n).unwrap();
         lines.map(|l| l.split('\t').collect::<Vec<_>>())
-            .filter(|c| c[col("mode")] == "free_forward" && c[col("role")] == "trained" && c[col("stream")] != "joint")
+            .filter(|c| c[col("mode")] == "free_forward" && c[col("role")] == "trained")
             .map(|c| c[col("log_score")].parse::<f64>().unwrap())
             .sum()
     }).collect();

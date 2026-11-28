@@ -24,13 +24,13 @@ fn score_folders(root: &Path) -> Vec<PathBuf> {
     folders(root).into_iter().filter(|(_, id, _)| id["kind"] == crate::fit_store::Score::KIND).map(|(p, _, _)| p).collect()
 }
 
-/// The sum of a score's `joint` log scores over its rows of `mode` and
-/// `role`: the elpd compare reports for it.
-fn joint_sum(folder: &Path, mode: &str, role: &str) -> (usize, f64) {
-    let rows = tsv_rows(&std::fs::read_to_string(folder.join("scored.tsv")).unwrap());
+/// The sum of a one-step score's joint log scores over its rows of `role`:
+/// the elpd compare reports for it.
+fn joint_sum(folder: &Path, role: &str) -> (usize, f64) {
+    let rows = tsv_rows(&std::fs::read_to_string(folder.join("joint_rows.tsv")).unwrap());
     let joint: Vec<f64> = rows
         .iter()
-        .filter(|r| r["stream"] == "joint" && r["mode"] == mode && r["role"] == role)
+        .filter(|r| r["role"] == role)
         .map(|r| r["log_score"].parse::<f64>().unwrap())
         .collect();
     (joint.len(), joint.iter().sum())
@@ -68,7 +68,7 @@ fn a_held_out_compare_of_two_stored_fits_differences_their_stored_scores() {
     assert_eq!(folders(&root).len(), before, "compare found the stored scores and stored nothing");
     let rows = compared(&out);
     let mut stored: Vec<(usize, f64)> =
-        score_folders(&root).iter().map(|s| joint_sum(s, "one_step", "held_out")).collect();
+        score_folders(&root).iter().map(|s| joint_sum(s, "held_out")).collect();
     let mut shown: Vec<(usize, f64)> = rows
         .values()
         .map(|r| (r["t_score"].as_u64().unwrap() as usize, r["elpd"].as_f64().unwrap()))
@@ -188,6 +188,27 @@ fn forecasts_are_compared_per_lead_and_refused_at_different_leads_or_reaches() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains("(reach)") && err.contains("\"3 days\"") && err.contains("\"3\""), "{err}");
+}
+
+/// A one-step score and a forecast score, of the data-row and the target
+/// layout, are refused together: the one-step rows have no lead and the
+/// forecast's have one per target.
+#[test]
+fn a_one_step_score_and_a_forecast_score_are_refused_together() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    for (fit, mode, label) in [("@fit", &["--mode", "one_step"][..], "os"), ("@other", &["--horizon", "3 days", "--stream", "daily_cases"][..], "fc")] {
+        ok(
+            &predict_in(cwd.path(), &root, &[&["predict", fit][..], mode, &["--n-draws", "3", "--particles", "20", "--label", label]].concat()),
+            "predict",
+        );
+        ok(&run(cwd.path(), &root, &[&["score", &format!("@{label}")][..], DATA].concat()), "score");
+    }
+    let out = run(cwd.path(), &root, &["compare", "@os", "@fc"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("different leads") && err.contains("'@os' at —") && err.contains("'@fc' at 1, 2, 3"), "{err}");
 }
 
 /// Each fixture data file cut to its header and the rows after day 24, the
